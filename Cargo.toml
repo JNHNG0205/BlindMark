@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/blindmark-types",
+    "contracts/blindmark",
+    "grader/outlayer-grader",
+    "grader/outlayer-keyrelease",
+]
+# near-sdk refuses a plain host `cargo check`, so bare cargo commands skip the contract.
+default-members = [
+    "crates/blindmark-types",
+    "grader/outlayer-grader",
+    "grader/outlayer-keyrelease",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+blindmark-types = { path = "crates/blindmark-types" }
+near-sdk = "5.30.0"
+
+# CLAUDE.md section 17: no unwrap() in contract or grader paths.
+[workspace.lints.clippy]
+unwrap_used = "deny"
+
+[profile.release]
+codegen-units = 1
+opt-level = "z"
+lto = true
+debug = false
+panic = "abort"
+overflow-checks = true

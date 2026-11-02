@@ -1,0 +1,15 @@
+[package]
+name = "outlayer-grader"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "outlayer-grader"
+path = "src/main.rs"
+
+[dependencies]
+blindmark-types.workspace = true
+
+[lints]
+workspace = true

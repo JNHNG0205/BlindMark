@@ -1,0 +1,20 @@
+{
+  "name": "@blindmark/verifier",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "blindmark": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "@blindmark/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "~6.0.3"
+  }
+}

@@ -1,0 +1,5 @@
+# Pinned because the grader's WASM sha256 is its on-chain measurement.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown", "wasm32-wasip2"]

@@ -1,0 +1,7 @@
+CLAUDE.md
+pnpm-lock.yaml
+target/
+dist/
+.next/
+next-env.d.ts
+benchmarks/*/private/

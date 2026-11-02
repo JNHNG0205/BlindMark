@@ -1,0 +1,12 @@
+[package]
+name = "outlayer-keyrelease"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "outlayer-keyrelease"
+path = "src/main.rs"
+
+[lints]
+workspace = true

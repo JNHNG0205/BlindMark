@@ -1,0 +1,22 @@
+# Secrets (only .env.example is committed)
+.env
+.env.*
+!.env.example
+
+# Private benchmark data (plaintext items, answers, rubrics)
+benchmarks/*/private/
+
+# Rust
+target/
+
+# JS
+node_modules/
+dist/
+.next/
+next-env.d.ts
+*.tsbuildinfo
+
+# OS and editor
+.DS_Store
+.idea/
+.vscode/

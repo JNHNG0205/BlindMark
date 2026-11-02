@@ -1,0 +1,9 @@
+.git
+.env
+.env.*
+benchmarks/*/private/
+target/
+**/node_modules/
+**/dist/
+**/.next/
+**/*.tsbuildinfo
