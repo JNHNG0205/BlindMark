@@ -375,7 +375,8 @@ request_execution({
 - **Lost runs.** 1 of 17 live runs got no result and returned `null` after about 120 s, charged only the base fee. That is one sample, but an 11-run eval would fail about half the time at that rate, so `null` is retried up to `MAX_RETRIES` (section 7.2).
 - **Deposit.** `COMPUTE_PER_RUN` is 0.02 NEAR; `estimate_execution_cost` on testnet returned 0.01905 NEAR for the limits above, and a small live run cost about 0.001 NEAR. A price change means redeploying. Input up to 32 KB holds no extra deposit.
 - **Refunds.** OutLayer sends unused compute straight to `payer_account_id`, so the contract counts all it attaches as `compute_spent`. If `request_execution` itself panics or runs out of gas, that run's deposit returns to the contract and stays there (seen live). This is accepted so the contract can never refund money it does not hold.
-- **Gas.** Attach 60 Tgas to `request_execution` (60 worked with a 20 KB input; 52 ran out) and at least 10 Tgas to each callback. 3 dispatches per transaction used 218 of 300 Tgas, a 27% margin; 4 used 291, a 3% margin. A callback that also starts aggregation uses about 153 Tgas per shard, and 2 of those exceeded the 300 Tgas limit, so aggregation is started by `continue_dispatch`.
+- **Gas.** Attach 60 Tgas to `request_execution` (60 worked with a 20 KB input; 52 ran out) and at least 10 Tgas to each callback. 3 dispatches per transaction used 218 of 300 Tgas, a 27% margin; 4 used 291, a 3% margin. A callback that also starts aggregation uses about 153 Tgas per shard, and 2 of those exceeded the 300 Tgas limit, so aggregation is started by `continue_dispatch`. In the sandbox with the real contract, `request_eval` with 3 dispatches burnt 5.5 Tgas in BlindMark's own receipt, on top of the 210 Tgas it attaches to runs and callbacks.
+- **Callers must not wait for final execution.** A `request_eval` or `continue_dispatch` transaction stays unfinished until OutLayer's worker answers, because OutLayer pauses it with yield/resume. A client waiting for final execution hits its RPC timeout, and some clients, including `near-workspaces`, then re-sign and send the call again, which requests a second eval. Send these calls with `waitUntil: "INCLUDED"` or async, never retry them automatically, and follow progress through `get_eval`.
 
 **Version pinning is a score integrity requirement [FIXED requirement, verified live in S6].** Every dispatch, grade and aggregate, must set `version_key` to the backend's `measurement`. Omitting it runs the project's active version, which the project owner can change: live, a pinned call ran `v1` while an unpinned call ran the newly activated `v2`. The `WasmHash` condition on K protects only confidentiality: another project version cannot read K, but it could still print a forged `GradeResult` or `AggregateResult`, and the contract would certify it.
 
@@ -383,7 +384,7 @@ A version key equals the WASM hash only for a `WasmUrl` version; a GitHub-source
 
 ### 7.4 Events [FIXED]
 
-NEP-297, `standard: "blindmark"`, `version: "1.0.0"`. Events: `benchmark_registered`, `eval_requested`, `shard_graded`, `eval_certified`, `eval_refunded`, `agent_registered`.
+NEP-297, `standard: "blindmark"`, `version: "1.0.0"`. Events: `benchmark_registered`, `eval_requested`, `shard_graded`, `eval_certified`, `eval_refunded`, `agent_registered`. `data` is a single object, not an array, for example `{"eval_id":0,"amount":"1100000000000000000000000"}`.
 
 ### 7.5 Contract invariants
 
@@ -467,7 +468,7 @@ Output must be readable by an AI judge from a terminal in under a minute.
 | `/evals/[id]` | Live status: shards graded, aggregation, certificate link |
 | `/certificates/[id]` | Certificate details, trust tier, verify command to copy, data path trace with a proof badge per hop |
 
-Rules: K and plaintext never leave the browser except encrypted to the OutLayer keystore key. Never put K in URLs, logs, analytics or local storage.
+Rules: K and plaintext never leave the browser except encrypted to the OutLayer keystore key. Never put K in URLs, logs, analytics or local storage. Send `request_eval` and `continue_dispatch` without waiting for final execution and never retry them automatically (section 7.3); poll `get_eval` for progress.
 
 Leaderboard: show each model's latest certificate per benchmark and its number of attempts, never its best, because best-of-N inflates scores.
 
@@ -563,6 +564,8 @@ Record results in this section as they land.
 
 Role 2 runs S4 and S7 on the spike contract, which accepts any project and can pass `secrets_ref`.
 
+**S6 integration (2026-11-03): passed in a local sandbox** running the real BlindMark contract against OutLayer's deployed contract code, with the test as the worker (`contracts/blindmark/tests/sandbox.rs`). A full eval certified and paid out, a lost run was retried, and an unknown pinned version failed and refunded. An end-to-end eval on testnet is still to come with the deploy scripts.
+
 ---
 
 ## 16. Commands
@@ -573,7 +576,7 @@ cargo test -p blindmark-types
 cargo check -p blindmark-contract --target wasm32-unknown-unknown      # near-sdk 5.30 refuses plain host `cargo check`
 cargo install cargo-near --locked                                      # once per machine
 cargo near build non-reproducible-wasm --manifest-path contracts/blindmark/Cargo.toml   # output in target/near/; `reproducible-wasm` untested [VERIFY]
-cargo test -p blindmark-contract
+cargo test -p blindmark-contract                                       # includes sandbox tests: needs network on first run, about 1 minute
 cargo build -p outlayer-grader --target wasm32-wasip2 --release
 
 # JS
