@@ -1,22 +1,15 @@
 {
   "merkle": [
     {
-      "ciphertexts_utf8": [
-        "ciphertext-0"
-      ],
+      "ciphertexts_utf8": ["ciphertext-0"],
       "leaves": [
         "86a5b2e27d2cc0f7fde4f7b13fccfdabd2aea3f20f5e16a89fc4629cfeb206ac"
       ],
       "root": "86a5b2e27d2cc0f7fde4f7b13fccfdabd2aea3f20f5e16a89fc4629cfeb206ac",
-      "proofs": [
-        []
-      ]
+      "proofs": [[]]
     },
     {
-      "ciphertexts_utf8": [
-        "ciphertext-0",
-        "ciphertext-1"
-      ],
+      "ciphertexts_utf8": ["ciphertext-0", "ciphertext-1"],
       "leaves": [
         "86a5b2e27d2cc0f7fde4f7b13fccfdabd2aea3f20f5e16a89fc4629cfeb206ac",
         "536ca191e542f6678f2b9483c4ac7e67298a39333ceb1ac2510f89cbb120e876"
@@ -38,11 +31,7 @@
       ]
     },
     {
-      "ciphertexts_utf8": [
-        "ciphertext-0",
-        "ciphertext-1",
-        "ciphertext-2"
-      ],
+      "ciphertexts_utf8": ["ciphertext-0", "ciphertext-1", "ciphertext-2"],
       "leaves": [
         "86a5b2e27d2cc0f7fde4f7b13fccfdabd2aea3f20f5e16a89fc4629cfeb206ac",
         "536ca191e542f6678f2b9483c4ac7e67298a39333ceb1ac2510f89cbb120e876",
