@@ -9,6 +9,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 blindmark-types.workspace = true
+hex = "0.4"
 near-sdk.workspace = true
 
 [dev-dependencies]

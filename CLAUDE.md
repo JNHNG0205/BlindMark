@@ -345,7 +345,9 @@ Callbacks (`#[private]`). Each is a no-op if the eval is no longer in the status
 Anyone:
 - `refund_expired(eval_id)`: if status is `Failed`, or `now > deadline_ns` and status is neither `Certified` nor `Refunded`, set status `Refunded` first, then refund the requester (`price + compute_budget - compute_spent`).
 
-Views: `get_benchmark`, `list_benchmarks(from, limit)`, `get_eval`, `get_certificate(eval_id)`, `list_certificates(benchmark_id, from, limit)`, `get_backends`, `get_models`, `get_usage(benchmark_id, model_id)`.
+Views: `get_benchmark`, `list_benchmarks(from, limit)`, `get_eval`, `get_certificate(eval_id)`, `list_certificates(benchmark_id, from, limit)`, `get_backends`, `get_models`, `get_usage(benchmark_id, model_id)`, `eval_storage_deposit(shard_count)`. Nanosecond fields (`*_ns`) are `U64` in JSON, a decimal string, because they exceed what a JavaScript number holds exactly.
+
+Storage deposit: 1,500 bytes plus 750 per shard at the storage byte price. Unit tests measured 987 bytes for 1 shard and 43,656 for 64 with the largest allowed results, and fail if the deposit ever falls below the measured use.
 
 Part 2 (after day 8):
 - `register_agent(attestation)`: verifies TDX attestation with the `shade-attestation` crate against the `ShadeDstack` backend measurement; stores agent account and public key.

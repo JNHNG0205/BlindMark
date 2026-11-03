@@ -130,6 +130,7 @@ name = "blindmark-contract"
 version = "0.1.0"
 dependencies = [
  "blindmark-types",
+ "hex",
  "near-sdk",
 ]
 
