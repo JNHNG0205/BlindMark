@@ -402,7 +402,7 @@ NEP-297, `standard: "blindmark"`, `version: "1.0.0"`. Events: `benchmark_registe
 Single WASM binary, reads JSON from stdin, writes JSON to stdout, flushes. Build: `cargo build --target wasm32-wasip2 --release`. Use `[[bin]]`, not `[lib]` [FIXED per OutLayer docs].
 
 **Secrets and keys.**
-- K arrives as an env var from the OutLayer secret referenced by `secrets_ref`. Env var name: `BLINDMARK_K` (hex) [FIXED name, VERIFY delivery].
+- K arrives as an env var from the OutLayer secret referenced by `secrets_ref`. Env var name: `BLINDMARK_K` (hex) [FIXED name, VERIFY delivery]. **If `BLINDMARK_K` is missing, fail closed.** OutLayer runs the WASM without secrets when the referenced secret does not exist (seen in its worker source), so a missing K must produce `ok: false`, never a graded result.
 - `NEARAI_API_KEY` arrives as an author secret declared in the manifest (`author_secrets`) [VERIFY].
 - Encryption key path `partials` declared in the manifest with `bind: "project"`, `caller: "predecessor"`, and `storage_account: "predecessor"` [VERIFY].
 
@@ -564,7 +564,9 @@ Record results in this section as they land.
 
 Role 2 runs S4 and S7 on the spike contract, which accepts any project and can pass `secrets_ref`.
 
-**S6 integration (2026-11-03): passed in a local sandbox** running the real BlindMark contract against OutLayer's deployed contract code, with the test as the worker (`contracts/blindmark/tests/sandbox.rs`). A full eval certified and paid out, a lost run was retried, and an unknown pinned version failed and refunded. An end-to-end eval on testnet is still to come with the deploy scripts.
+**S6 integration (2026-11-03): passed in a local sandbox** running the real BlindMark contract against OutLayer's deployed contract code, with the test as the worker (`contracts/blindmark/tests/sandbox.rs`). A full eval certified and paid out, a lost run was retried, and an unknown pinned version failed and refunded.
+
+**Testnet end to end (2026-11-03): passed.** `scripts/e2e-testnet-stub.mjs` certified eval 0 on `blindmark.blindmark-jh-fe87ee.testnet` through OutLayer's real worker in about 2.5 minutes, using the test-only stub grader (`scripts/stub-grader`, backend `test-stub-94149ba5`, score 0 by design). One grade run was lost and returned `null` after about 120 s; the contract queued it and resent it, and it then succeeded. That is 2 lost runs out of about 20 on testnet so far, so `MAX_RETRIES` matters. Final `continue_dispatch` transactions: `3tKLYJmAUmExsFEJGqGL3PUYirxVXKQ7RXbDPk1XsGa1`, `3LCig4kwGkWwqEnbNW9FN8RwLFSRA9VGwRA5cCVBkdHP`.
 
 ---
 
@@ -584,8 +586,9 @@ pnpm install
 pnpm --filter @blindmark/web dev
 pnpm --filter @blindmark/verifier build && pnpm blindmark verify <eval_id>
 
-# Deploy (testnet only without asking)
-./scripts/deploy-testnet.sh
+# Deploy (testnet only without asking). Needs .env and `cargo near`; scripts refuse other networks.
+./scripts/deploy-testnet.sh                                            # creates, deploys only changed code, initializes once
+node scripts/e2e-testnet-stub.mjs <stub wasm> <https URL>              # TEST ONLY: throwaway eval with scripts/stub-grader
 ```
 
 ---
