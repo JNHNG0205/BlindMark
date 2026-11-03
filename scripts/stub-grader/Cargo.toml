@@ -1,0 +1,23 @@
+# TEST ONLY. Not part of the product and not a workspace member, so no production build
+# includes it (CLAUDE.md section 2, rule 5).
+[package]
+name = "blindmark-test-stub-grader"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "blindmark-test-stub-grader"
+path = "src/main.rs"
+
+[dependencies]
+blindmark-types = { path = "../../crates/blindmark-types" }
+serde_json = "1"
+
+[workspace]
+
+[profile.release]
+codegen-units = 1
+opt-level = "z"
+lto = true
+panic = "abort"

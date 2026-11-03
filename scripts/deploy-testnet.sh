@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Will deploy the contract to testnet only. Mainnet needs human confirmation (CLAUDE.md section 2).
+# Builds and deploys the BlindMark contract to testnet. Refuses any other network (CLAUDE.md
+# section 2). Needs .env (see .env.example) and `cargo near`.
 set -euo pipefail
 
-echo "deploy-testnet: not implemented" >&2
-exit 1
+cd "$(dirname "$0")/.."
+
+cargo near build non-reproducible-wasm --manifest-path contracts/blindmark/Cargo.toml
+node scripts/deploy-testnet.mjs target/near/blindmark_contract/blindmark_contract.wasm
