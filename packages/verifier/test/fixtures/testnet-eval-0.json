@@ -1,0 +1,89 @@
+{
+  "eval_id": 0,
+  "certificate": {
+    "eval_id": 0,
+    "benchmark_id": 0,
+    "benchmark_version": 1,
+    "dataset_root": "445c2d6a7dbb13ac5bcc77d7e4c66d4624a1a4c37b7443457a999d7ffedb3c49",
+    "protocol_hash": "1f0df13e8dbae7eab97608396aca749ea9667bc27dd4ed27521f6b5479f8d2fc",
+    "model_id": "test-model",
+    "trust_tier": "C",
+    "backend_id": "test-stub-94149ba5",
+    "grader_measurement": "94149ba53b68ff82f6a37ef603e87ea97e1e61642fc3aa9504779eaff03fe347",
+    "n_items": 10,
+    "n_correct": 0,
+    "score_bps": 0,
+    "ci_low_bps": 0,
+    "ci_high_bps": 0,
+    "mean_latency_ms": 0,
+    "evidence_hashes": [
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ],
+    "issued_at_ns": "1793677592262350227",
+    "issued_block": 275994725
+  },
+  "evaluation": {
+    "id": 0,
+    "benchmark_id": 0,
+    "requester": "blindmark-jh-fe87ee.testnet",
+    "model_id": "test-model",
+    "backend_id": "test-stub-94149ba5",
+    "fee": "10000000000000000000000",
+    "compute_budget": "120000000000000000000000",
+    "compute_spent": "80000000000000000000000",
+    "status": "Certified",
+    "next_shard_to_dispatch": 2,
+    "retries_left": 2,
+    "retry_shards": [],
+    "partials": ["test-stub", "test-stub"],
+    "evidence_hashes": [
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ],
+    "nonce": "491e7e3b3eb060aa28e469dd7e2e4d1c060856c64286ca3fd7fc5037c54d34da",
+    "created_at_ns": "1793677438473753098",
+    "created_block": 275994461,
+    "deadline_ns": "1793699038473753098"
+  },
+  "benchmark": {
+    "id": 0,
+    "version": 1,
+    "owner": "blindmark-jh-fe87ee.testnet",
+    "title": "TEST STUB: not a real benchmark",
+    "description": "Throwaway benchmark for checking the contract end to end with the stub grader.",
+    "grading_type": "exact",
+    "dataset_root": "445c2d6a7dbb13ac5bcc77d7e4c66d4624a1a4c37b7443457a999d7ffedb3c49",
+    "protocol_hash": "1f0df13e8dbae7eab97608396aca749ea9667bc27dd4ed27521f6b5479f8d2fc",
+    "protocol_uri": "https://example.invalid/test-stub-protocol.json",
+    "shard_uris": [
+      "https://example.invalid/0.bin",
+      "https://example.invalid/1.bin"
+    ],
+    "shard_hashes": [
+      "63d959dac9c0a9490d41d44dfd793956685af4172a9dbe958c6840025b3fce75",
+      "e10d73a5ee1fdc12675ebb0229a40ba43b797ca47a52d3a1cc1752d57287a6f2"
+    ],
+    "item_count": 10,
+    "sample_items_uri": null,
+    "price": "10000000000000000000000",
+    "secret_ref": {
+      "owner": "blindmark-jh-fe87ee.testnet",
+      "profile": "test-stub-none"
+    },
+    "max_evals_per_model": 100,
+    "cooldown_ns": "0",
+    "status": "Active",
+    "created_at_ns": "1793677434734282971",
+    "created_block": 275994455
+  },
+  "backends": [
+    {
+      "id": "test-stub-94149ba5",
+      "kind": "OutLayer",
+      "measurement": "94149ba53b68ff82f6a37ef603e87ea97e1e61642fc3aa9504779eaff03fe347",
+      "outlayer_project": "blindmark-jh-fe87ee.testnet/blindmark-test-stub",
+      "active": true
+    }
+  ]
+}
