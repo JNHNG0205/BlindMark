@@ -104,8 +104,8 @@ Ownership (4 members): Role 1 contract and integration (`contracts/`, `scripts/`
 | Part 1 grader | Rust to WASM, target `wasm32-wasip2`, OutLayer (Intel TDX). HTTP via a WASI P2 HTTP client. Crypto: `chacha20poly1305` (XChaCha20), `x25519-dalek`, `ed25519-dalek`, `hkdf`, `sha2` |
 | Model inference | NEAR AI Cloud gateway `https://cloud-api.near.ai`, OpenAI-compatible, Confidential TEE tier only |
 | Part 2 grader | Shade Agent Framework (`@neardefi/shade-agent-js`, `@neardefi/shade-agent-cli`) on Phala Cloud dstack; Docker; Python sandbox using OpenBench or pytest |
-| Frontend | Next.js (App Router), TypeScript, NEAR Wallet Selector, `near-api-js`, `@noble/ciphers`, `@noble/hashes`, `@noble/curves`, Recharts |
-| Verifier | Node TypeScript CLI, `near-api-js`, `jose`, `@noble/curves` (ed25519 only, per section 8) |
+| Frontend | Next.js (App Router), TypeScript, NEAR Wallet Selector 10 with our own picker (`components/wallet-modal.tsx`, no `modal-ui`). Extensions: Sender, OKX, Bitget, Nightly, listed only when detected by their injected globals (the modules' `available` flag is always true for Nightly and MyNearWallet), with install links for the rest. Web wallets Intear and MyNearWallet stay registered so existing sessions restore, but the picker does not list them. Meteor's SDK needs `near-api-js` 6 and HOT's pulls in Solana and wallet selector 8, so both are left out. Bitget's module throws when its extension is absent, so it is listed only when installed, contract views over plain JSON-RPC, `@noble/ciphers`, `@noble/hashes`. Error bars are plain CSS, no chart library |
+| Verifier | Node TypeScript CLI, contract views over plain JSON-RPC, `@blindmark/shared`. Later checks 5 and 6 add `jose` and `@noble/curves` (ed25519 only, per section 8) |
 | Shard storage | [TBD] FastFS (preferred, OutLayer-friendly) or IPFS. Ciphertext only |
 | Package manager | pnpm |
 | Version pins | Rust 1.99.0 (`rust-toolchain.toml`). TypeScript 6.0, because `typescript-eslint` does not support 7 yet. ESLint 9, because the plugins in `eslint-config-next` do not support 10 yet. Remove each pin once its blocker clears |
@@ -462,7 +462,8 @@ Output must be readable by an AI judge from a terminal in under a minute.
 
 | Route | Purpose |
 |---|---|
-| `/` | Benchmarks list and leaderboard with score, error bars, n, trust tier, "statistically tied" labels |
+| `/` | Benchmark explorer: short intro and trust chain, overview cards (score distribution, leader per benchmark, latest certificates), benchmarks table filterable by status and search, then how it works and how to verify |
+| `/leaderboard` | Full leaderboard explorer: every latest certificate in one table, filter by benchmark, trust tier and search, sort by score, n or issue time; change from the previous attempt |
 | `/benchmarks/new` | Owner wizard: upload JSONL and protocol, encrypt shards in the browser, compute Merkle root, upload ciphertext, register on-chain, then create the locked K secret in OutLayer [VERIFY whether via API or OutLayer Secrets page] |
 | `/benchmarks/[id]` | Benchmark card: protocol, sample items, item count, price, certificates; "Request evaluation" button |
 | `/evals/[id]` | Live status: shards graded, aggregation, certificate link |
