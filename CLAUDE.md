@@ -312,7 +312,8 @@ Benchmark { id, version, owner: AccountId, title, description, grading_type,
             status: Active | Retired, created_at_ns, created_block }
 Eval { id, benchmark_id, requester, model_id, backend_id, fee: U128, compute_budget: U128, compute_spent: U128,
        status: Dispatching | Grading | Aggregating | Certified | Failed | Refunded,
-       next_shard_to_dispatch: u32, partials: Vec<Option<SealedPartial>>,
+       next_shard_to_dispatch: u32, retries_left: u32, retry_shards: Vec<u32>,
+       partials: Vec<Option<SealedPartial>>,
        evidence_hashes: Vec<Option<String>>, nonce: String,
        created_at_ns, created_block, deadline_ns }
 Certificate { eval_id, benchmark_id, benchmark_version, dataset_root, protocol_hash,
@@ -334,12 +335,12 @@ Owner:
 - `retire_benchmark(id)` (owner only; existing evals still complete).
 
 Model team:
-- `request_eval(benchmark_id, model_id, backend_id) -> u64` (payable). Requires attached deposit `>= price + compute_budget(shard_count) + eval_storage_deposit(shard_count)`, and refunds any excess at once. `compute_budget(shard_count) = (shard_count + 1) * COMPUTE_PER_RUN`, where the extra run is aggregation and `COMPUTE_PER_RUN` is a constant 0.02 NEAR (section 7.3). `eval_storage_deposit(shard_count)` is a non-refundable base amount plus a per-shard amount covering the eval and certificate records; a storage test checks it always covers the storage used. Checks: benchmark active, model active, backend active and of kind `OutLayer` (`ShadeDstack` is rejected until Part 2), probing limits (count and cooldown). `Usage.count` goes up here and down on `Refunded`, since a refunded eval published no score; the cooldown is not reset. Creates `Eval`, sets `deadline_ns = now + 6h`, dispatches up to `MAX_DISPATCH_PER_TX` shards; S6 sets this value (section 7.3) [VERIFY gas].
-- `continue_dispatch(eval_id)` (anyone can call): dispatches the next batch of shards. Requires status `Dispatching` and `now <= deadline_ns`.
+- `request_eval(benchmark_id, model_id, backend_id) -> u64` (payable). Requires attached deposit `>= price + compute_budget(shard_count) + eval_storage_deposit(shard_count)`, and refunds any excess at once. `compute_budget(shard_count) = (shard_count + 1 + MAX_RETRIES) * COMPUTE_PER_RUN`, covering every shard, aggregation and the retries, with `MAX_RETRIES = 3` per eval and `COMPUTE_PER_RUN` a constant 0.02 NEAR (section 7.3). `eval_storage_deposit(shard_count)` is a non-refundable base amount plus a per-shard amount covering the eval and certificate records; a storage test checks it always covers the storage used. Checks: benchmark active, model active, backend active and of kind `OutLayer` (`ShadeDstack` is rejected until Part 2), probing limits (count and cooldown). `Usage.count` goes up here and down on `Refunded`, since a refunded eval published no score; the cooldown is not reset. Creates `Eval`, sets `deadline_ns = now + 6h`, dispatches up to `MAX_DISPATCH_PER_TX = 3` shards (measured in S6, section 7.3; integration tests must confirm it with the real contract's overhead).
+- `continue_dispatch(eval_id)` (anyone can call, requires `now <= deadline_ns`): sends runs up to `MAX_DISPATCH_PER_TX`, queued retries first, then the next unsent shards. Status moves from `Dispatching` to `Grading` once every shard has been sent. With status `Grading`, no queued retries and every partial present, it sets `Aggregating` and dispatches the aggregate run. Otherwise it panics, because there is nothing to send.
 
 Callbacks (`#[private]`). Each is a no-op if the eval is no longer in the status it expects, because a result can arrive after a refund. A rejection sets status `Failed` and returns normally; a panic would discard that state change.
-- `on_shard_graded(eval_id, shard_index)`: expects `Dispatching` or `Grading` and an empty slot for that shard. Parses OutLayer output into `GradeResult`; rejects if `eval_id`, `shard_index` or `shard_hash` mismatch or `ok == false`; stores `sealed_partial` and `evidence_hash`. When all shards are present, sets `Aggregating` and dispatches the aggregate run.
-- `on_aggregated(eval_id)`: expects `Aggregating`. Parses `AggregateResult`; rejects unless `eval_id` matches, `ok == true` and `n_items == benchmark.item_count`; writes `Certificate`; pays treasury `price * platform_fee_bps / 10000` (integer floor) and the owner the remainder; refunds unused compute budget; status `Certified`; emits event.
+- `on_shard_graded(eval_id, shard_index)`: expects `Dispatching` or `Grading` and an empty slot for that shard. Parses OutLayer output into `GradeResult`; rejects if `eval_id`, `shard_index` or `shard_hash` mismatch or `ok == false`; stores `sealed_partial` and `evidence_hash`. A `null` result is a lost or crashed run, not a rejection: if `retries_left > 0`, decrement it and queue the shard in `retry_shards`; otherwise set `Failed`. A failed promise means misconfiguration or too little gas, so it sets `Failed`. Aggregation is started by `continue_dispatch`, not here.
+- `on_aggregated(eval_id)`: expects `Aggregating`. On a `null` result with `retries_left > 0`, decrement it and return to `Grading` so `continue_dispatch` resends aggregation; with none left, set `Failed`. Otherwise parses `AggregateResult`; rejects unless `eval_id` matches, `ok == true` and `n_items == benchmark.item_count`; writes `Certificate`; pays treasury `price * platform_fee_bps / 10000` (integer floor) and the owner the remainder; refunds unused compute budget; status `Certified`; emits event.
 
 Anyone:
 - `refund_expired(eval_id)`: if status is `Failed`, or `now > deadline_ns` and status is neither `Certified` nor `Refunded`, set status `Refunded` first, then refund the requester (`price + compute_budget - compute_spent`).
@@ -351,9 +352,9 @@ Part 2 (after day 8):
 - `is_agent_approved(account_id) -> Option<AgentInfo>` (view, read by `outlayer-keyrelease`).
 - `submit_shard_result(eval_id, shard_index, result: GradeResult)`: callable only by a registered agent for evals using a `ShadeDstack` backend.
 
-### 7.3 OutLayer call from the contract [VERIFY]
+### 7.3 OutLayer call from the contract
 
-Cross-contract call to `outlayer_contract.request_execution` with attached deposit from the eval's compute budget, then `.then(on_shard_graded)`. Shape from the OutLayer docs and contract source; the live test in S6 is still open:
+Cross-contract call to `outlayer_contract.request_execution` with attached deposit from the eval's compute budget, then `.then(on_shard_graded)`. Tested live on testnet in S6 (results in section 15), except `secrets_ref`, which S4 tests:
 
 ```
 request_execution({
@@ -368,12 +369,13 @@ request_execution({
 
 - **`resource_limits` is required.** Without it OutLayer only compiles and never runs the code. S3 may lower these values.
 - **`secrets_ref`** is sent for grade runs only. Aggregate runs do not need K.
-- **Callback result.** With `response_format: "Json"`, the promise result is the grader's stdout as JSON, or `null` if the run failed. Read it with `env::promise_result_checked`, parse it by hand and treat `null`, malformed JSON or more than 900 bytes as a rejection. Never use `#[callback_result]`, because a parse failure there panics and loses the `Failed` status.
-- **Deposit.** `COMPUTE_PER_RUN` is 0.02 NEAR; `estimate_execution_cost` on testnet returned 0.01905 NEAR for the limits above. A price change means redeploying. Input up to 32 KB holds no extra deposit.
-- **Refunds.** OutLayer sends unused compute straight to `payer_account_id`, so the contract counts all it attaches as `compute_spent`. If `request_execution` itself panics, that run's deposit is expected to return to the contract and stay there [VERIFY]. This is accepted so the contract can never refund money it does not hold.
-- **Gas.** OutLayer reserves at least 50 Tgas for its own callback, so 4 dispatches per transaction, or starting aggregation from `on_shard_graded`, look too expensive. S6 measures this. Rule: `MAX_DISPATCH_PER_TX` is the highest count that leaves a 20% gas margin. Aggregation stays in `on_shard_graded` only if at least 2 dispatches still fit; otherwise `continue_dispatch` starts it. Record the result here and in section 7.2.
+- **Callback result.** With `response_format: "Json"`, the promise succeeds with the grader's stdout as JSON. OutLayer reparses that JSON and may reorder keys, so nothing may depend on its exact bytes. The promise also succeeds, with `null`, when the guest exits non-zero, prints non-JSON or the run is lost. It fails only if `request_execution` itself panics or runs out of gas. Read it with `env::promise_result_checked`, parse it by hand and treat malformed JSON or more than 900 bytes as a rejection. Never use `#[callback_result]`, because a parse failure there panics and loses the `Failed` status.
+- **Lost runs.** 1 of 17 live runs got no result and returned `null` after about 120 s, charged only the base fee. That is one sample, but an 11-run eval would fail about half the time at that rate, so `null` is retried up to `MAX_RETRIES` (section 7.2).
+- **Deposit.** `COMPUTE_PER_RUN` is 0.02 NEAR; `estimate_execution_cost` on testnet returned 0.01905 NEAR for the limits above, and a small live run cost about 0.001 NEAR. A price change means redeploying. Input up to 32 KB holds no extra deposit.
+- **Refunds.** OutLayer sends unused compute straight to `payer_account_id`, so the contract counts all it attaches as `compute_spent`. If `request_execution` itself panics or runs out of gas, that run's deposit returns to the contract and stays there (seen live). This is accepted so the contract can never refund money it does not hold.
+- **Gas.** Attach 60 Tgas to `request_execution` (60 worked with a 20 KB input; 52 ran out) and at least 10 Tgas to each callback. 3 dispatches per transaction used 218 of 300 Tgas, a 27% margin; 4 used 291, a 3% margin. A callback that also starts aggregation uses about 153 Tgas per shard, and 2 of those exceeded the 300 Tgas limit, so aggregation is started by `continue_dispatch`.
 
-**Version pinning is a score integrity requirement [FIXED requirement, VERIFY live].** Every dispatch, grade and aggregate, must set `version_key` to the backend's `measurement`. Omitting it runs the project's active version, which the project owner can change. The `WasmHash` condition on K protects only confidentiality: another project version cannot read K, but it could still print a forged `GradeResult` or `AggregateResult`, and the contract would certify it.
+**Version pinning is a score integrity requirement [FIXED requirement, verified live in S6].** Every dispatch, grade and aggregate, must set `version_key` to the backend's `measurement`. Omitting it runs the project's active version, which the project owner can change: live, a pinned call ran `v1` while an unpinned call ran the newly activated `v2`. The `WasmHash` condition on K protects only confidentiality: another project version cannot read K, but it could still print a forged `GradeResult` or `AggregateResult`, and the contract would certify it.
 
 A version key equals the WASM hash only for a `WasmUrl` version; a GitHub-sourced version's key is `repo@commit`. So the grader must be published as a `WasmUrl` version. `WasmUrl` accepts only `https://` URLs, and OutLayer checks the hash. We host grader builds as GitHub Release assets on this repo.
 
@@ -415,7 +417,9 @@ Single WASM binary, reads JSON from stdin, writes JSON to stdout, flushes. Build
 
 **Mode `aggregate` steps.** Open every sealed partial, check shard indices are `0..expected_shards` exactly once, sum, compute Wilson interval, emit `AggregateResult`.
 
-**Limits [VERIFY].** Execution time 60 s default, 180 s max; output at most 900 bytes (our own bound, enforced by the contract; OutLayer allows far more); no file system; memory in-process only. Keep shards small enough to finish within the limit (measure in spike S3). The default 50 items will not fit the default limit if run sequentially: at the section 6 example latency that is 92 s before signature fetches. S3 decides the shard size, time limit and any concurrency; record them here.
+**Stdout is public if it is not valid JSON [seen live in S6].** OutLayer writes the failure, including the guest's stdout, to a public on-chain log. So stdout must only ever be the single result JSON, and nothing derived from items, answers, K or model output may reach stdout, including through panic messages or a partly written result. Set a panic handling path that emits a fixed error code. Failure logs also include guest backtraces, so assume stderr and panic text may become public too until S3 shows otherwise.
+
+**Limits [VERIFY].** Execution time 60 s default, 180 s max; output at most 900 bytes (our own bound, enforced by the contract; OutLayer allows far more); plan for a real limit near 120 s, because a run with no result came back as `null` after about 120 s in S6, and S3 must confirm whether longer runs survive; no file system; memory in-process only. Keep shards small enough to finish within the limit (measure in spike S3). The default 50 items will not fit the default limit if run sequentially: at the section 6 example latency that is 92 s before signature fetches. S3 decides the shard size, time limit and any concurrency; record them here.
 
 **Reproducible build [FIXED].** Commit `Cargo.lock`. Use OutLayer's `scripts/build_github_wasm.sh --target wasm32-wasip2` so the sha256 is known before publishing. The sha256 is the backend `measurement`, the project's `version_key` and the secret's `WasmHash` condition. Publish each build as a `WasmUrl` project version (section 7.3).
 
@@ -494,7 +498,7 @@ Every certificate shows its tier.
 ## 14. Scope and milestones
 
 **Must-have**
-1. Contract: benchmarks, evals with escrow, backends, models allowlist, certificates, payout, refund, probing limits. **Done when** `near-workspaces` tests pass for payout, refund, second refund rejected, late callback after refund ignored, and probing limits.
+1. Contract: benchmarks, evals with escrow, backends, models allowlist, certificates, payout, refund, probing limits. **Done when** `near-workspaces` tests pass for payout, refund, second refund rejected, late callback after refund ignored, lost-run retries, and probing limits.
 2. Part 1 grader: grade and aggregate modes, E2EE model calls, MCQ/exact/numeric grading, sealed partials. **Done when** a testnet eval through the contract against real NEAR AI produces a certificate, built without the `mock` feature.
 3. Owner upload flow with browser encryption and Merkle root. **Done when** `register_benchmark` accepts the browser-computed root and the grader decrypts the browser-encrypted shards.
 4. Verifier CLI. **Done when** it passes on a real certificate and exits non-zero on a fixture with an altered score.
@@ -539,7 +543,23 @@ Every certificate shows its tier.
 
 Record results in this section as they land.
 
-**S6 status: docs and source read, live test open.** `outlayer.testnet` is deployed and answers views. Call shape, callback format and version keys come from the OutLayer docs and the `out-layer/outlayer` source (read 2026-11-03) and are recorded in section 7.3. Still to prove live: the callback bytes, pinning, gas and deposit. The spike contract and WASM are throwaway and stay out of this repo; record transaction hashes here. Role 2 runs S4 and S7 on the deployed spike contract.
+**S6 result (2026-11-03): passed live on testnet, using a throwaway contract and guest.** The remaining S6 condition, the integration test with the real BlindMark contract, belongs to the contract work. Findings are in sections 7.2, 7.3 and 8. Spike contract: `spike.blindmark-jh-fe87ee.testnet`, project `blindmark-jh-fe87ee.testnet/s6`, builds on the `spike-s6` pre-release (delete after S4 and S7). The Rust 1.99 contract built with `cargo near` deployed and ran on testnet.
+
+| Test | Result | Transaction |
+|---|---|---|
+| Pinned to `v1`, `v2` active | Ran `v1` | `C8DJMvFKYEB9qjxP13LnW3tyiTNFGMBrPw1AuwQQTvV4` |
+| Unpinned | Ran `v2` | `9nhshPUMyTsofUrzXjSHivKiUqfhRJP4HPiD9tpSDh7S` |
+| Guest exits non-zero | Success with `null` | `J1yxrVvNg2mDjjECn4UzXmUvqEyYqama2TrRRAf84zuE` |
+| Guest prints non-JSON | Success with `null`; stdout in public log | `5UYMLYVCXmFZcMLpRF7fhaVdaAf2tSDZYb8KNbEvwpyp` |
+| Unknown version key | Promise failed; deposit back to contract | `3FNxJz2NBPSmvTe8CL8KobFUX46D1GYb4stTFGh4PpYK` |
+| Request gas 52 Tgas | Out of gas; promise failed | `DxAjqfKkfcHWGd32k64VjaabEgqCVhm2QEv4SKLb9Xsq` |
+| 3 dispatches at 60 + 10 Tgas | 218 Tgas; 1 run lost after about 120 s | `HbkfRumdH79nqykyFxGpnZYH1Kqu74qqcGbjgaJ84zn5` |
+| 4 dispatches at 60 + 10 Tgas | 291 Tgas; all ran | `9kSKXYkudz5RqyAJx5TerhUMWBfUF5nh2rkTpCy3abLx` |
+| 20 KB input at 60 Tgas | Ran | `Bcn8UKvuTWBWPuLaj5VdkpGH9424tbHYMhfv6PnS6q6R` |
+| Callback dispatches a follow-up | Ran; 153 Tgas per shard | `ySoEX7TdcDt6LxWMGRE38ABbr4L5y6nWrvUDwAfpCHB` |
+| 2 dispatches with follow-ups | Out of gas; transaction failed | `8BJGpFbX7m5XxApBPNXqPh6MtYVbU8fCKPw6frQrWMqG` |
+
+Role 2 runs S4 and S7 on the spike contract, which accepts any project and can pass `secrets_ref`.
 
 ---
 
