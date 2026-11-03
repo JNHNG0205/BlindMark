@@ -4,3 +4,4 @@
 //! NEAR and WASI dependencies.
 
 pub mod merkle;
+pub mod wire;
