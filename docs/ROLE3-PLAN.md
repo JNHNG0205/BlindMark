@@ -117,6 +117,25 @@ Ask Role 2 for: FastFS fetchability from the grader WASM, the evidence bundle fo
   - lint, typecheck, test (48) and build pass
 - Still open in T15: `/` and `/leaderboard` print the raw RPC error JSON inline when the contract cannot be read; a plainer message would read better.
 
+### 2026-11-04 (end of day): everything not blocked, Phases 4 to 6
+
+| Task | Status | Notes |
+|---|---|---|
+| T15 hardening | **Done** | `/` and `/leaderboard` no longer print raw RPC JSON; a failed read goes to `app/error.tsx`. Other routes already had empty and not-found states |
+| T16 Part 2 in the UI | **Partly done** | The certificate shows the backend kind ("OutLayer WASM" or "Shade agent on Phala dstack") next to the grader build. The trust tier was already shown. The rest waits on Part 2 after day 8 |
+| T17 should-haves | **Partly done** | The certificate shows the cost: the fee, plus at most the compute sent to OutLayer, since OutLayer refunds unused compute to the requester. Mean latency was already shown. The contamination demo and reference baselines need Role 4 data |
+| T18 `docs/DEMO.md` | **Done, draft** | 8-step script with a pre-recording checklist. Not ready to record until a real backend exists |
+| T19 demo video | **Blocked** | Needs a real backend (Role 1 and Role 2), `math-v1` (Role 4), and a human to record it |
+| T20 X post draft | **Done, draft** | `docs/X-POST-DRAFT.md`, 6 posts, each under 280 characters, with placeholders for links and the real score. The human posts it |
+| T21 README | **Done for Role 3 sections** | "Try it" and "Verify a certificate" are written, with eval 0 output labelled as the stub. The "verifier is a stub" line is fixed. Replace the sample output after T12 |
+| T22 clean checkout | **Done for the JS side** | A fresh clone of `ui` passes `pnpm install --frozen-lockfile`, verifier build, `pnpm blindmark verify 0` (same output as the README), 48 tests, `pnpm build`, lint and typecheck, on Node 22. Re-run after the real grader lands. The Rust steps belong to Roles 1 and 2 |
+
+Still blocked:
+- T5 needs a human with a testnet wallet.
+- T9, T11, T12 and T14 (live part) need Role 2's grader and evidence bundles.
+- T13 runs only if the day 8 checkpoint fails.
+- T19 needs all of the above.
+
 ---
 
 ## 1. Current state of Role 3 code
