@@ -1,0 +1,8 @@
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  // Stop `next dev` from writing AGENTS.md; agent instructions live in the root CLAUDE.md.
+  agentRules: false,
+};
+
+export default nextConfig;
