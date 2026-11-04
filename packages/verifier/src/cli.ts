@@ -3,6 +3,7 @@
 import { parseArgs } from "node:util";
 import { leafHash, toHex } from "@blindmark/shared";
 import { runChecks, type ChainData, type OffChainData } from "./checks.js";
+import { fetchOutLayerEvidence, OUTLAYER_ENDPOINTS } from "./fetch.js";
 
 const NETWORKS: Record<string, { rpc: string; contract?: string }> = {
   testnet: {
@@ -13,7 +14,7 @@ const NETWORKS: Record<string, { rpc: string; contract?: string }> = {
 };
 
 const USAGE =
-  "usage: blindmark verify <eval_id> [--network testnet] [--contract <account>] [--rpc <url>] [--fetch-shards] [--json]";
+  "usage: blindmark verify <eval_id> [--network testnet] [--contract <account>] [--rpc <url>] [--fetch-shards] [--skip-attestations] [--json]";
 
 function usage(): never {
   console.error(USAGE);
@@ -29,6 +30,7 @@ try {
       contract: { type: "string" },
       rpc: { type: "string" },
       "fetch-shards": { type: "boolean", default: false },
+      "skip-attestations": { type: "boolean", default: false },
       json: { type: "boolean", default: false },
     },
   });
@@ -126,6 +128,10 @@ try {
 const offChain: OffChainData = {};
 if (values["fetch-shards"] && data.benchmark) {
   offChain.shard_hashes = await fetchShardHashes(data.benchmark.shard_uris);
+}
+const outlayerAt = OUTLAYER_ENDPOINTS[values.network];
+if (!values["skip-attestations"] && outlayerAt && data.certificate) {
+  offChain.outlayer = await fetchOutLayerEvidence(data, outlayerAt);
 }
 const results = runChecks(data, offChain);
 const failed = results.some((r) => r.status === "FAIL");

@@ -181,6 +181,31 @@ describe("envelope", () => {
     }
   });
 
+  it("encodes shard plaintext exactly as the shared vector, so browser shards match Rust's", () => {
+    const c = vectors.envelope.find((v) => v.plaintext_utf8.startsWith("{"))!;
+    const plaintext = shardPlaintextBytes({
+      benchmark_id: c.benchmark_id,
+      version: c.version,
+      shard_index: c.shard_index,
+      items: [],
+    });
+    expect(new TextDecoder().decode(plaintext)).toBe(c.plaintext_utf8);
+    expect(
+      toHex(
+        encryptShard(
+          fromHex(c.key),
+          {
+            benchmark_id: c.benchmark_id,
+            version: c.version,
+            shard_index: c.shard_index,
+          },
+          plaintext,
+          fromHex(c.nonce),
+        ),
+      ),
+    ).toBe(c.wire);
+  });
+
   it("round trips and binds the AAD and key", () => {
     const plaintext = new TextEncoder().encode("hello");
     const wire = encryptShard(key, id, plaintext);

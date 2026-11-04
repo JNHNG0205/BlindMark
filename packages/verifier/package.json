@@ -11,7 +11,9 @@
     "typecheck": "tsc -b"
   },
   "dependencies": {
-    "@blindmark/shared": "workspace:*"
+    "@blindmark/shared": "workspace:*",
+    "@noble/hashes": "^2.4.0",
+    "@phala/dcap-qvl": "0.7.1"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
@@ -21,6 +23,14 @@
     "./checks": {
       "types": "./dist/checks.d.ts",
       "default": "./dist/checks.js"
+    },
+    "./fetch": {
+      "types": "./dist/fetch.d.ts",
+      "default": "./dist/fetch.js"
+    },
+    "./attestation": {
+      "types": "./dist/attestation.d.ts",
+      "default": "./dist/attestation.js"
     }
   }
 }
