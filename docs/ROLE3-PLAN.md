@@ -105,6 +105,18 @@ Notes for the team:
 
 Ask Role 2 for: FastFS fetchability from the grader WASM, the evidence bundle format and location (T9), and a date for the first real certificate (T11, T12).
 
+### 2026-11-04 (later): Phase 3 check and early Phase 4 hardening
+
+- **Phase 3 (T12, T13) blocked.** On testnet the only backend is `test-stub-94149ba5`, the only model is `test-model`, the only benchmark is the stub one and eval 0 is the only certificate. `grader/outlayer-grader/src/main.rs` on `ui`, `main` and `jh` is still a stub that fails closed. T12 needs Role 2's grader and Role 1 to register a real backend.
+- **T14:** `apps/web/lib/leaderboard.test.ts` already covers latest-not-best and ties. Checking against two real certificates waits on T12.
+- **T15 hardening, partly done:**
+  - added `apps/web/app/error.tsx`, a root error boundary that only re-reads data, never sends a transaction
+  - added `apps/web/app/loading.tsx` for server routes
+  - confirmed the streamed error reaches the boundary with a dev server pointed at a missing contract; not checked visually in a browser
+  - re-checked that `request_eval` and `continue_dispatch` are sent without waiting and never resent, and that nothing in `apps/web` writes to `console`, `localStorage` or `sessionStorage`
+  - lint, typecheck, test (48) and build pass
+- Still open in T15: `/` and `/leaderboard` print the raw RPC error JSON inline when the contract cannot be read; a plainer message would read better.
+
 ---
 
 ## 1. Current state of Role 3 code
