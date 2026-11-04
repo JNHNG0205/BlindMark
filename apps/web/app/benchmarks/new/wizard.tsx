@@ -3,8 +3,8 @@
 // Owner upload wizard. Spec: CLAUDE.md sections 5.3, 5.4, 8 and 11.
 //
 // K and the plaintext items live only in this component's memory. They must never be logged,
-// put in a URL, sent to analytics or written to browser storage. K is shown to the owner once
-// so they can create the locked OutLayer secret themselves.
+// put in a URL, sent to analytics or written to browser storage. K leaves the browser only
+// encrypted to the OutLayer keystore key (step 4); the owner may also reveal it to keep a copy.
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -22,8 +22,28 @@ import {
   type RegisterBenchmarkArgs,
 } from "@blindmark/shared";
 import { returnValue, useWallet } from "../../../components/wallet";
-import { CONTRACT_ID } from "../../../lib/config";
-import { getBackends, predictNextBenchmarkId } from "../../../lib/rpc";
+import {
+  CONTRACT_ID,
+  FASTFS_HOST,
+  OUTLAYER_API_URL,
+  OUTLAYER_CONTRACT_ID,
+} from "../../../lib/config";
+import {
+  benchmarkFolder,
+  encodeFastfsFile,
+  FASTFS_METHOD,
+  fastfsUrl,
+  type FastfsFile,
+} from "../../../lib/fastfs";
+import {
+  encryptK,
+  fetchKeystorePubkey,
+  kAccessCondition,
+  projectAccessor,
+  SECRET_ENV_NAME,
+  storeSecretsArgs,
+} from "../../../lib/outlayer";
+import { getBackends, predictNextBenchmarkId, viewOn } from "../../../lib/rpc";
 
 const DEFAULT_PROTOCOL = {
   version: 1,
@@ -77,8 +97,38 @@ function isHttps(text: string): boolean {
   }
 }
 
+type LineStatus = "PASS" | "FAIL" | "WAIT";
+
+interface HostLine {
+  status: LineStatus;
+  text: string;
+}
+
+interface HostCheck {
+  /** The URIs this result is for; a result for other URIs does not count. */
+  key: string;
+  lines: HostLine[];
+  running: boolean;
+}
+
+/** FastFS serves a file once its indexer has seen the transaction, usually within seconds. */
+const HOST_CHECK_ATTEMPTS = 12;
+const HOST_CHECK_GAP_MS = 5000;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Profiles allow letters, digits, dashes and underscores (OutLayer contract). */
+function isProfileName(text: string): boolean {
+  return /^[A-Za-z0-9_-]{1,64}$/.test(text);
+}
+
+/** One profile per benchmark version, so a new benchmark never replaces an older one's K. */
+function defaultProfile(benchmarkId: number, version: number): string {
+  return `blindmark-bm${benchmarkId}-v${version}`;
+}
+
 export function NewBenchmarkWizard() {
-  const { accountId, call, signIn } = useWallet();
+  const { accountId, call, sendTransactions, signIn } = useWallet();
 
   // Public metadata.
   const [title, setTitle] = useState("");
@@ -93,7 +143,7 @@ export function NewBenchmarkWizard() {
   const [protocolText, setProtocolText] = useState(
     JSON.stringify(DEFAULT_PROTOCOL, null, 2),
   );
-  const [profile, setProfile] = useState("blindmark-v1");
+  const [profile, setProfile] = useState("");
 
   // Private: the items file, K and the build stay in memory only.
   const [items, setItems] = useState<ReturnType<typeof parseItemsJsonl> | null>(
@@ -108,10 +158,22 @@ export function NewBenchmarkWizard() {
   // Hosting and registration.
   const [backends, setBackends] = useState<Backend[]>([]);
   const [graderBackend, setGraderBackend] = useState("");
+  const [hosting, setHosting] = useState<"fastfs" | "manual">("fastfs");
   const [shardBase, setShardBase] = useState("");
-  const [protocolUri, setProtocolUri] = useState("");
-  const [samplesUri, setSamplesUri] = useState("");
-  const [hostCheck, setHostCheck] = useState<string[] | null>(null);
+  const [manualProtocolUri, setManualProtocolUri] = useState("");
+  const [manualSamplesUri, setManualSamplesUri] = useState("");
+  // Public sample items: the owner picks a file that is published as is.
+  const [samplesFile, setSamplesFile] = useState<Uint8Array | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadNote, setUploadNote] = useState<string | null>(null);
+  const [hostCheck, setHostCheck] = useState<HostCheck | null>(null);
+  const checkRun = useRef(0);
+  // The ciphertext this page stored in OutLayer, compared with what the contract holds.
+  const [secretStatus, setSecretStatus] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
+  const [storingSecret, setStoringSecret] = useState(false);
   const [secretCreated, setSecretCreated] = useState(false);
   const [registering, setRegistering] = useState(false);
   const [result, setResult] = useState<{
@@ -168,7 +230,9 @@ export function NewBenchmarkWizard() {
     setBuilt(null);
     setShowKey(false);
     setSecretCreated(false);
+    setSecretStatus(null);
     setHostCheck(null);
+    setUploadNote(null);
     setResult(null);
   }
 
@@ -192,6 +256,7 @@ export function NewBenchmarkWizard() {
         Number(itemsPerShard),
       );
       keyRef.current = key;
+      setProfile(defaultProfile(benchmarkId, v));
       setBuilt({
         encrypted,
         benchmarkId,
@@ -204,26 +269,39 @@ export function NewBenchmarkWizard() {
     }
   }
 
+  // FastFS URLs name the uploader, so they exist only once a wallet is connected.
+  const folder = built ? benchmarkFolder(built.benchmarkId, built.version) : "";
+  const fastfsUri = (name: string) =>
+    built && accountId
+      ? fastfsUrl(FASTFS_HOST, accountId, CONTRACT_ID, `${folder}/${name}`)
+      : "";
   const shardUris = built
     ? built.encrypted.shards.map((s) =>
-        joinUrl(shardBase, shardFileName(s.shard_index)),
+        hosting === "fastfs"
+          ? fastfsUri(shardFileName(s.shard_index))
+          : joinUrl(shardBase, shardFileName(s.shard_index)),
       )
     : [];
+  const protocolUri =
+    hosting === "fastfs"
+      ? fastfsUri("protocol.json")
+      : manualProtocolUri.trim();
+  const samplesUri =
+    hosting === "fastfs"
+      ? samplesFile
+        ? fastfsUri("samples.jsonl")
+        : ""
+      : manualSamplesUri.trim();
+  const hostKey = JSON.stringify([shardUris, protocolUri, samplesUri]);
+  const hostedOk =
+    hostCheck !== null &&
+    hostCheck.key === hostKey &&
+    !hostCheck.running &&
+    hostCheck.lines.every((l) => l.status === "PASS");
+
   const grader = backends.find((b) => b.id === graderBackend);
   const accessCondition = grader
-    ? {
-        Logic: {
-          operator: "And",
-          conditions: [
-            { WasmHash: { hash: grader.measurement } },
-            {
-              Predecessor: {
-                condition: { Whitelist: { accounts: [CONTRACT_ID] } },
-              },
-            },
-          ],
-        },
-      }
+    ? kAccessCondition(grader.measurement, CONTRACT_ID)
     : null;
 
   const manifest = built && {
@@ -241,40 +319,230 @@ export function NewBenchmarkWizard() {
     })),
   };
 
-  async function checkHosting() {
+  const manifestText = manifest ? JSON.stringify(manifest, null, 2) + "\n" : "";
+
+  /**
+   * Fetches every public file back and re-hashes it (section 5.4 leaf hash for shards, section
+   * 5.2 protocol hash). Registration stays blocked until every line is PASS for the current
+   * URIs. A missing file is retried, because FastFS serves a file only after indexing it; a
+   * wrong hash fails at once.
+   */
+  async function checkHosting(attempts = 1) {
     if (!built) return;
-    setHostCheck(["checking..."]);
-    const lines = await Promise.all(
-      built.encrypted.shards.map(async (s, i) => {
-        const uri = shardUris[i]!;
+    const run = ++checkRun.current;
+    const key = hostKey;
+    const targets: {
+      label: string;
+      uri: string;
+      verify: (bytes: Uint8Array) => boolean;
+    }[] = built.encrypted.shards.map((s, i) => ({
+      label: `shard ${i}`,
+      uri: shardUris[i]!,
+      verify: (bytes) => toHex(leafHash(bytes)) === s.hash,
+    }));
+    targets.push({
+      label: "protocol",
+      uri: protocolUri,
+      verify: (bytes) => {
         try {
-          const response = await fetch(uri, { cache: "no-store" });
-          if (!response.ok) return `FAIL shard ${i}: HTTP ${response.status}`;
-          const hash = toHex(
-            leafHash(new Uint8Array(await response.arrayBuffer())),
+          return (
+            protocolHash(JSON.parse(new TextDecoder().decode(bytes))) ===
+            built.protocolHash
           );
-          return hash === s.hash
-            ? `PASS shard ${i}`
-            : `FAIL shard ${i}: hash differs`;
         } catch {
-          return `WARN shard ${i}: could not fetch from the browser (CORS or network)`;
+          return false;
         }
-      }),
-    );
-    try {
-      const response = await fetch(protocolUri, { cache: "no-store" });
-      const hash = protocolHash(await response.json());
-      lines.push(
-        hash === built.protocolHash
-          ? "PASS protocol"
-          : "FAIL protocol: hash differs",
-      );
-    } catch {
-      lines.push(
-        "WARN protocol: could not fetch from the browser (CORS or network)",
-      );
+      },
+    });
+    if (samplesUri) {
+      targets.push({
+        label: "samples",
+        uri: samplesUri,
+        verify: (bytes) =>
+          hosting === "manual" ||
+          (samplesFile !== null && toHex(bytes) === toHex(samplesFile)),
+      });
     }
-    setHostCheck(lines);
+
+    const checkOne = async (t: (typeof targets)[number]): Promise<HostLine> => {
+      if (!isHttps(t.uri))
+        return { status: "FAIL", text: `${t.label}: not an https:// URL` };
+      try {
+        const response = await fetch(t.uri, { cache: "no-store" });
+        if (!response.ok)
+          return {
+            status: "WAIT",
+            text: `${t.label}: HTTP ${response.status} from ${t.uri}`,
+          };
+        return t.verify(new Uint8Array(await response.arrayBuffer()))
+          ? { status: "PASS", text: `${t.label}: hash matches` }
+          : { status: "FAIL", text: `${t.label}: content or hash differs` };
+      } catch {
+        return {
+          status: "WAIT",
+          text: `${t.label}: could not fetch from the browser (CORS or network)`,
+        };
+      }
+    };
+
+    let lines: HostLine[] = targets.map((t) => ({
+      status: "WAIT",
+      text: `${t.label}: checking`,
+    }));
+    setHostCheck({ key, lines, running: true });
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      if (attempt > 1) await sleep(HOST_CHECK_GAP_MS);
+      lines = await Promise.all(
+        targets.map((t, i) =>
+          lines[i]!.status === "WAIT" ? checkOne(t) : lines[i]!,
+        ),
+      );
+      if (run !== checkRun.current) return; // a newer check replaced this one
+      const pending = lines.some((l) => l.status === "WAIT");
+      if (!pending || attempt === attempts) break;
+      setHostCheck({ key, lines, running: true });
+    }
+    // Whatever is still missing after the last attempt is a failure.
+    lines = lines.map((l) =>
+      l.status === "WAIT" ? { status: "FAIL", text: l.text } : l,
+    );
+    setHostCheck({ key, lines, running: false });
+  }
+
+  /**
+   * Publishes the ciphertext shards and public files to FastFS: one wallet-signed call per file.
+   * Only ciphertext and public files are passed here; K and plaintext items never are.
+   */
+  async function uploadToFastfs() {
+    if (!built || !accountId || uploading) return;
+    setUploading(true);
+    setUploadNote(null);
+    const utf8 = (text: string) => new TextEncoder().encode(text);
+    const files: FastfsFile[] = [
+      ...built.encrypted.shards.map((s) => ({
+        relativePath: `${folder}/${shardFileName(s.shard_index)}`,
+        mimeType: "application/octet-stream",
+        content: s.ciphertext,
+      })),
+      {
+        relativePath: `${folder}/protocol.json`,
+        mimeType: "application/json",
+        content: utf8(built.protocolText),
+      },
+      {
+        relativePath: `${folder}/manifest.json`,
+        mimeType: "application/json",
+        content: utf8(manifestText),
+      },
+    ];
+    if (samplesFile) {
+      files.push({
+        relativePath: `${folder}/samples.jsonl`,
+        mimeType: "application/x-ndjson",
+        content: samplesFile,
+      });
+    }
+    try {
+      const txs = files.map((f) => ({
+        receiverId: CONTRACT_ID,
+        method: FASTFS_METHOD,
+        args: encodeFastfsFile(f),
+        // The call fails on chain by design (no contract has this method); the indexer reads
+        // the arguments. 1 Tgas keeps the failure cheap.
+        tgas: 1,
+      }));
+      await sendTransactions(txs);
+    } catch (error) {
+      setUploadNote(
+        `The wallet reported: ${(error as Error).message}. FastFS calls fail on chain by ` +
+          "design, so this can be normal; the check below decides.",
+      );
+    } finally {
+      setUploading(false);
+    }
+    await checkHosting(HOST_CHECK_ATTEMPTS);
+  }
+
+  /**
+   * Stores K in OutLayer, encrypted in this browser to the keystore key, under the section 8
+   * access condition. Never logs or returns K; only the ciphertext leaves the page.
+   */
+  async function createSecret() {
+    const key = keyRef.current;
+    const projectId = grader?.outlayer_project;
+    if (!built || !accountId || !grader || !projectId || !key) return;
+    if (storingSecret) return;
+    setStoringSecret(true);
+    setSecretStatus(null);
+    setSecretCreated(false);
+    const prof = profile.trim();
+    const lookup = {
+      accessor: projectAccessor(projectId),
+      profile: prof,
+      owner: accountId,
+    };
+    try {
+      const pubkey = await fetchKeystorePubkey(
+        OUTLAYER_API_URL,
+        projectId,
+        accountId,
+      );
+      const sealed = encryptK(pubkey, key);
+      const args = storeSecretsArgs(
+        projectId,
+        prof,
+        sealed,
+        grader.measurement,
+        CONTRACT_ID,
+      );
+      const deposit = await viewOn<string>(
+        OUTLAYER_CONTRACT_ID,
+        "estimate_storage_cost",
+        {
+          ...lookup,
+          encrypted_secrets_base64: sealed,
+          access: args.access,
+          vault_id: null,
+        },
+      );
+      let walletError: string | null = null;
+      try {
+        await call("store_secrets", args, {
+          receiverId: OUTLAYER_CONTRACT_ID,
+          deposit: BigInt(deposit),
+          tgas: 50,
+        });
+      } catch (error) {
+        walletError = (error as Error).message;
+      }
+      // The contract is the source of truth: it must hold exactly this ciphertext.
+      const stored = await viewOn<{ encrypted_secrets?: string } | null>(
+        OUTLAYER_CONTRACT_ID,
+        "get_secrets",
+        lookup,
+      );
+      if (stored?.encrypted_secrets === sealed) {
+        setSecretCreated(true);
+        setSecretStatus({
+          ok: true,
+          text: `Stored in ${OUTLAYER_CONTRACT_ID} as profile ${prof} for project ${projectId}.`,
+        });
+      } else {
+        setSecretStatus({
+          ok: false,
+          text: walletError
+            ? `Not stored: ${walletError}`
+            : `${OUTLAYER_CONTRACT_ID} does not hold this ciphertext yet. Try again in a moment.`,
+        });
+      }
+    } catch (error) {
+      setSecretStatus({
+        ok: false,
+        text: `Could not create the secret: ${(error as Error).message}`,
+      });
+    } finally {
+      setStoringSecret(false);
+    }
   }
 
   const registerArgs: RegisterBenchmarkArgs | null = (() => {
@@ -290,11 +558,11 @@ export function NewBenchmarkWizard() {
         ),
         dataset_root: built.encrypted.dataset_root,
         protocol_hash: built.protocolHash,
-        protocol_uri: protocolUri.trim(),
+        protocol_uri: protocolUri,
         shard_uris: shardUris,
         shard_hashes: built.encrypted.shards.map((s) => s.hash),
         item_count: built.encrypted.item_count,
-        sample_items_uri: samplesUri.trim() || null,
+        sample_items_uri: samplesUri || null,
         price: parseNear(price).toString(),
         secret_ref: { owner: accountId, profile: profile.trim() },
         max_evals_per_model: Number(maxEvals),
@@ -310,16 +578,13 @@ export function NewBenchmarkWizard() {
 
   const problems: string[] = [];
   if (!title.trim()) problems.push("a title");
-  if (!isHttps(shardBase)) problems.push("an https:// base URL for the shards");
-  if (!isHttps(protocolUri)) problems.push("an https:// protocol URI");
-  if (samplesUri.trim() && !isHttps(samplesUri))
-    problems.push("an https:// sample items URI");
-  if (!profile.trim()) problems.push("a secret profile name");
+  if (!hostedOk) problems.push("every hosted file to pass the check in step 3");
+  if (!isProfileName(profile.trim()))
+    problems.push("a secret profile name (letters, digits, - and _)");
   if (!registerArgs) problems.push("a valid price, cap and cooldown");
   else if (BigInt(registerArgs.price) <= 0n)
     problems.push("a price above zero");
-  if (!secretCreated)
-    problems.push("confirmation that K is saved in the OutLayer secret");
+  if (!secretCreated) problems.push("K stored in the OutLayer secret (step 4)");
 
   async function register() {
     if (!registerArgs || !built || registering) return;
@@ -477,33 +742,100 @@ export function NewBenchmarkWizard() {
         <section className="card">
           <h2 style={{ marginTop: 0 }}>3. Host the public files</h2>
           <p>
-            Upload these files to any public https host that serves them
-            unchanged. They hold ciphertext, hashes and the public protocol
-            only.
+            These files hold ciphertext, hashes and the public protocol only.
+            Every file is fetched back and re-hashed before you can register.
           </p>
-          <label>
-            <span>Base URL the shard files will be served from</span>
-            <input
-              placeholder="https://example.com/bm/v1"
-              value={shardBase}
-              onChange={(e) => setShardBase(e.target.value)}
-            />
-          </label>
-          <label>
-            <span>Protocol URI</span>
-            <input
-              placeholder="https://example.com/bm/v1/protocol.json"
-              value={protocolUri}
-              onChange={(e) => setProtocolUri(e.target.value)}
-            />
-          </label>
-          <label>
-            <span>Public sample items URI (optional)</span>
-            <input
-              value={samplesUri}
-              onChange={(e) => setSamplesUri(e.target.value)}
-            />
-          </label>
+          <div className="row">
+            <label className="inline">
+              <input
+                type="radio"
+                name="hosting"
+                checked={hosting === "fastfs"}
+                onChange={() => setHosting("fastfs")}
+              />
+              Upload to FastFS with your wallet
+            </label>
+            <label className="inline">
+              <input
+                type="radio"
+                name="hosting"
+                checked={hosting === "manual"}
+                onChange={() => setHosting("manual")}
+              />
+              Host them myself
+            </label>
+          </div>
+
+          {hosting === "fastfs" ? (
+            <>
+              <p className="muted">
+                One wallet transaction per file (
+                {built.encrypted.shards.length + 2 + (samplesFile ? 1 : 0)} in
+                all). Each call fails on chain by design: FastFS reads the file
+                from the transaction and serves it at{" "}
+                <span className="mono">
+                  https://{FASTFS_HOST}/&lt;you&gt;/{CONTRACT_ID}/{folder}/
+                </span>
+                . Uploads are public and permanent.
+              </p>
+              <label>
+                <span>
+                  Public sample items (optional; published exactly as chosen, so
+                  never pick the private file)
+                </span>
+                <input
+                  type="file"
+                  accept=".jsonl,.json,.txt"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) setSamplesFile(null);
+                    else
+                      void file
+                        .arrayBuffer()
+                        .then((b) => setSamplesFile(new Uint8Array(b)));
+                  }}
+                />
+              </label>
+              {!accountId ? (
+                <button onClick={signIn}>Connect wallet to upload</button>
+              ) : (
+                <button
+                  disabled={uploading || hostCheck?.running}
+                  onClick={() => void uploadToFastfs()}
+                >
+                  {uploading ? "Waiting for wallet" : "Upload with wallet"}
+                </button>
+              )}
+              {uploadNote && <p className="muted">{uploadNote}</p>}
+            </>
+          ) : (
+            <>
+              <label>
+                <span>Base URL the shard files will be served from</span>
+                <input
+                  placeholder="https://example.com/bm/v1"
+                  value={shardBase}
+                  onChange={(e) => setShardBase(e.target.value)}
+                />
+              </label>
+              <label>
+                <span>Protocol URI</span>
+                <input
+                  placeholder="https://example.com/bm/v1/protocol.json"
+                  value={manualProtocolUri}
+                  onChange={(e) => setManualProtocolUri(e.target.value)}
+                />
+              </label>
+              <label>
+                <span>Public sample items URI (optional)</span>
+                <input
+                  value={manualSamplesUri}
+                  onChange={(e) => setManualSamplesUri(e.target.value)}
+                />
+              </label>
+            </>
+          )}
+
           <div className="row">
             <button
               className="secondary"
@@ -533,25 +865,33 @@ export function NewBenchmarkWizard() {
             </button>
             <button
               className="secondary"
+              disabled={!manifestText}
               onClick={() =>
-                download(
-                  "manifest.json",
-                  JSON.stringify(manifest, null, 2) + "\n",
-                  "application/json",
-                )
+                download("manifest.json", manifestText, "application/json")
               }
             >
               Download manifest.json
             </button>
             <button
               className="secondary"
-              disabled={!isHttps(shardBase) || !isHttps(protocolUri)}
+              disabled={
+                hostCheck?.running ||
+                !shardUris.every(isHttps) ||
+                !isHttps(protocolUri)
+              }
               onClick={() => void checkHosting()}
             >
               Check hosted files
             </button>
           </div>
-          {hostCheck && <pre>{hostCheck.join("\n")}</pre>}
+          {hostCheck && hostCheck.key === hostKey && (
+            <pre>
+              {hostCheck.lines
+                .map((l) => `${l.status.padEnd(4)} ${l.text}`)
+                .join("\n")}
+              {hostCheck.running ? "\nchecking again in a few seconds..." : ""}
+            </pre>
+          )}
         </section>
       )}
 
@@ -559,16 +899,20 @@ export function NewBenchmarkWizard() {
         <section className="card">
           <h2 style={{ marginTop: 0 }}>4. Lock K in OutLayer</h2>
           <p>
-            Create an OutLayer secret owned by your account so only the approved
-            grader build, called through the BlindMark contract, can read K.
-            This page does not create it for you yet [VERIFY: OutLayer API or
-            Secrets page].
+            Stores K as an OutLayer secret owned by your account, so only the
+            approved grader build, called through the BlindMark contract, can
+            read it. K is encrypted in this browser to the OutLayer keystore
+            key; only that ciphertext is sent.
           </p>
           <label>
             <span>Approved grader backend</span>
             <select
               value={graderBackend}
-              onChange={(e) => setGraderBackend(e.target.value)}
+              onChange={(e) => {
+                setGraderBackend(e.target.value);
+                setSecretCreated(false);
+                setSecretStatus(null);
+              }}
             >
               {backends.map((b) => (
                 <option key={b.id} value={b.id}>
@@ -580,26 +924,28 @@ export function NewBenchmarkWizard() {
           {backends.length === 0 && (
             <p className="error">No active OutLayer backend is registered.</p>
           )}
+          {grader && !grader.outlayer_project && (
+            <p className="error">
+              Backend {grader.id} names no OutLayer project, so the secret
+              cannot be bound to it.
+            </p>
+          )}
           <label>
-            <span>Secret profile name</span>
+            <span>Secret profile name (one per benchmark version)</span>
             <input
               value={profile}
-              onChange={(e) => setProfile(e.target.value)}
+              onChange={(e) => {
+                setProfile(e.target.value);
+                setSecretCreated(false);
+                setSecretStatus(null);
+              }}
             />
           </label>
           <dl className="facts">
+            <dt>Project</dt>
+            <dd className="mono">{grader?.outlayer_project ?? "none"}</dd>
             <dt>Variable</dt>
-            <dd className="mono">BLINDMARK_K</dd>
-            <dt>Value</dt>
-            <dd>
-              {showKey && keyRef.current ? (
-                <span className="mono">{toHex(keyRef.current)}</span>
-              ) : (
-                <button className="secondary" onClick={() => setShowKey(true)}>
-                  Reveal K
-                </button>
-              )}
-            </dd>
+            <dd className="mono">{SECRET_ENV_NAME}</dd>
           </dl>
           {accessCondition && (
             <>
@@ -607,20 +953,65 @@ export function NewBenchmarkWizard() {
               <pre>{JSON.stringify(accessCondition, null, 2)}</pre>
             </>
           )}
+          {!accountId ? (
+            <button onClick={signIn}>Connect wallet</button>
+          ) : (
+            <button
+              disabled={
+                storingSecret ||
+                !grader?.outlayer_project ||
+                !isProfileName(profile.trim())
+              }
+              onClick={() => void createSecret()}
+            >
+              {storingSecret
+                ? "Waiting for wallet"
+                : `Store K in ${OUTLAYER_CONTRACT_ID}`}
+            </button>
+          )}
+          {secretStatus && (
+            <p className={secretStatus.ok ? "" : "error"}>
+              {secretStatus.text}
+            </p>
+          )}
           <p className="notice">
             K is not saved anywhere by this page. If you leave or reload before
-            the secret exists, you must encrypt again. Anyone with K can read
+            registering, you must encrypt again. Storing replaces any secret
+            with the same project, profile and owner. Anyone with K can read
             your items.
           </p>
-          <label className="inline">
-            <input
-              type="checkbox"
-              checked={secretCreated}
-              onChange={(e) => setSecretCreated(e.target.checked)}
-            />
-            I created the OutLayer secret with this K, profile and access
-            condition.
-          </label>
+          <details>
+            <summary>Keep a copy of K, or create the secret yourself</summary>
+            <p>
+              Reveal K only to store it somewhere safe, or to create the secret
+              on the OutLayer Secrets page with the project, profile, variable
+              and access condition above.
+            </p>
+            <dl className="facts">
+              <dt>Value</dt>
+              <dd>
+                {showKey && keyRef.current ? (
+                  <span className="mono">{toHex(keyRef.current)}</span>
+                ) : (
+                  <button
+                    className="secondary"
+                    onClick={() => setShowKey(true)}
+                  >
+                    Reveal K
+                  </button>
+                )}
+              </dd>
+            </dl>
+            <label className="inline">
+              <input
+                type="checkbox"
+                checked={secretCreated}
+                onChange={(e) => setSecretCreated(e.target.checked)}
+              />
+              I created the OutLayer secret myself with this K, project, profile
+              and access condition.
+            </label>
+          </details>
         </section>
       )}
 

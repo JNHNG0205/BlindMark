@@ -14,6 +14,15 @@ function toBase64(text: string): string {
 }
 
 export async function view<T>(method: string, args: object = {}): Promise<T> {
+  return viewOn<T>(CONTRACT_ID, method, args);
+}
+
+/** A view on any contract, for example OutLayer's. */
+export async function viewOn<T>(
+  contractId: string,
+  method: string,
+  args: object = {},
+): Promise<T> {
   const response = await fetch(RPC_URL, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -25,7 +34,7 @@ export async function view<T>(method: string, args: object = {}): Promise<T> {
       params: {
         request_type: "call_function",
         finality: "optimistic",
-        account_id: CONTRACT_ID,
+        account_id: contractId,
         method_name: method,
         args_base64: toBase64(JSON.stringify(args)),
       },

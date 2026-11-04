@@ -17,6 +17,18 @@ const TGAS = 10n ** 12n;
 interface CallOptions {
   deposit?: bigint;
   tgas?: number;
+  /** Defaults to the BlindMark contract. */
+  receiverId?: string;
+  /** Raw arguments (for example Borsh bytes) instead of JSON. */
+  rawArgs?: Uint8Array;
+}
+
+export interface FunctionCallTx {
+  receiverId: string;
+  method: string;
+  args: object | Uint8Array;
+  deposit?: bigint;
+  tgas?: number;
 }
 
 interface WalletContextValue {
@@ -38,6 +50,12 @@ interface WalletContextValue {
     args: object,
     options?: CallOptions,
   ) => Promise<unknown>;
+  /**
+   * Signs and sends several single-call transactions with one wallet approval where the wallet
+   * supports it. Resolves with the wallet's outcomes; rejects if the wallet refuses or reports a
+   * failed transaction.
+   */
+  sendTransactions: (txs: FunctionCallTx[]) => Promise<unknown[]>;
 }
 
 const WalletContext = createContext<WalletContextValue | null>(null);
@@ -112,22 +130,50 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     async (
       method: string,
       args: object,
-      { deposit = 0n, tgas = 100 }: CallOptions = {},
+      {
+        deposit = 0n,
+        tgas = 100,
+        receiverId = CONTRACT_ID,
+        rawArgs,
+      }: CallOptions = {},
     ) => {
       if (!selector || !accountId) throw new Error("connect a wallet first");
       const { actionCreators } = await import("@near-wallet-selector/core");
       const wallet = await selector.wallet();
       return wallet.signAndSendTransaction({
-        receiverId: CONTRACT_ID,
+        receiverId,
         actions: [
           actionCreators.functionCall(
             method,
-            args,
+            rawArgs ?? args,
             BigInt(tgas) * TGAS,
             deposit,
           ),
         ],
       });
+    },
+    [selector, accountId],
+  );
+
+  const sendTransactions = useCallback(
+    async (txs: FunctionCallTx[]) => {
+      if (!selector || !accountId) throw new Error("connect a wallet first");
+      const { actionCreators } = await import("@near-wallet-selector/core");
+      const wallet = await selector.wallet();
+      const outcomes = await wallet.signAndSendTransactions({
+        transactions: txs.map((tx) => ({
+          receiverId: tx.receiverId,
+          actions: [
+            actionCreators.functionCall(
+              tx.method,
+              tx.args,
+              BigInt(tx.tgas ?? 30) * TGAS,
+              tx.deposit ?? 0n,
+            ),
+          ],
+        })),
+      });
+      return (outcomes ?? []) as unknown[];
     },
     [selector, accountId],
   );
@@ -141,6 +187,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         openAccount: () => setAccountOpen(true),
         signOut,
         call,
+        sendTransactions,
       }}
     >
       {children}

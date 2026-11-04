@@ -2,9 +2,15 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import {
   runChecks,
+  type ChainData,
   type CheckResult,
+  type OffChainData,
   type Status,
 } from "@blindmark/verifier/checks";
+import {
+  fetchOutLayerEvidence,
+  OUTLAYER_ENDPOINTS,
+} from "@blindmark/verifier/fetch";
 import { AppShell } from "../../../components/app-shell";
 import { CopyButton } from "../../../components/copy";
 import { Chip, Ledger, Lock, Tree } from "../../../components/icons";
@@ -57,6 +63,31 @@ const HOPS = [
   },
 ];
 
+/**
+ * OutLayer evidence per certified eval. A certified eval never changes, so a successful fetch
+ * is kept for the life of the server process; a failed one is retried on the next view.
+ */
+const outlayerCache = new Map<
+  number,
+  Promise<NonNullable<OffChainData["outlayer"]>>
+>();
+
+function outlayerEvidence(data: ChainData) {
+  const cached = outlayerCache.get(data.eval_id);
+  if (cached) return cached;
+  const at = OUTLAYER_ENDPOINTS[NETWORK_ID];
+  if (!at)
+    return Promise.resolve({
+      error: `no OutLayer endpoints for ${NETWORK_ID}`,
+    });
+  const pending = fetchOutLayerEvidence(data, at).then((result) => {
+    if ("error" in result) outlayerCache.delete(data.eval_id);
+    return result;
+  });
+  outlayerCache.set(data.eval_id, pending);
+  return pending;
+}
+
 function worst(results: CheckResult[]): Status {
   if (results.some((r) => r.status === "FAIL")) return "FAIL";
   if (results.some((r) => r.status === "WARN")) return "WARN";
@@ -84,13 +115,19 @@ export default async function CertificatePage({
   ]);
   if (!certificate) notFound();
   const benchmark = await getBenchmark(certificate.benchmark_id);
-  const results = runChecks({
+  const data: ChainData = {
     eval_id: evalId,
     certificate,
     evaluation,
     benchmark,
     backends,
-  });
+  };
+  // Same checks and data as `pnpm blindmark verify`, so both report the same statuses.
+  const offChain: OffChainData =
+    evaluation?.status === "Certified"
+      ? { outlayer: await outlayerEvidence(data) }
+      : {};
+  const results = runChecks(data, offChain);
   const overall = worst(results);
   const count = (s: Status) => results.filter((r) => r.status === s).length;
   const command = `pnpm blindmark verify ${evalId} --network ${NETWORK_ID} --contract ${CONTRACT_ID}`;
