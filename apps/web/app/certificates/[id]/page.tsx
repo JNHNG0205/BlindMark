@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { formatNear } from "@blindmark/shared";
 import {
   runChecks,
   type ChainData,
@@ -131,6 +132,9 @@ export default async function CertificatePage({
   const overall = worst(results);
   const count = (s: Status) => results.filter((r) => r.status === s).length;
   const command = `pnpm blindmark verify ${evalId} --network ${NETWORK_ID} --contract ${CONTRACT_ID}`;
+  const backendKind = backends.find(
+    (b) => b.id === certificate.backend_id,
+  )?.kind;
   const benchmarkTitle =
     benchmark?.title ?? `Benchmark ${certificate.benchmark_id}`;
 
@@ -200,6 +204,19 @@ export default async function CertificatePage({
               <span> ms</span>
             </dd>
           </div>
+          {evaluation && (
+            <div className="cost-fact">
+              <dt>Cost</dt>
+              <dd>
+                {formatNear(evaluation.fee)}
+                <span> NEAR fee</span>
+                <p>
+                  plus at most {formatNear(evaluation.compute_spent)} NEAR
+                  OutLayer compute; OutLayer refunds the unused part
+                </p>
+              </dd>
+            </div>
+          )}
           <div className="tier-fact">
             <dt>Trust tier</dt>
             <dd>
@@ -277,6 +294,13 @@ export default async function CertificatePage({
               <dt>Grader build</dt>
               <dd>
                 <span className="tag-inline">{certificate.backend_id}</span>
+                {backendKind && (
+                  <span className="tag-inline">
+                    {backendKind === "ShadeDstack"
+                      ? "Shade agent on Phala dstack"
+                      : "OutLayer WASM"}
+                  </span>
+                )}
                 <code>{certificate.grader_measurement}</code>
               </dd>
               <dt>Dataset root</dt>

@@ -964,6 +964,18 @@ pre {
   border-bottom: none;
 }
 
+.score-facts .cost-fact {
+  grid-column: 1 / -1;
+}
+
+.cost-fact p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
 .tier-fact dd {
   display: flex;
   align-items: flex-start;
