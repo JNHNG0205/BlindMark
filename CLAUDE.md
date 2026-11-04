@@ -285,7 +285,7 @@ Contains hashes and signatures only, never plaintext. Confirm that the signed `t
 
 ```
 admin: AccountId
-outlayer_contract: AccountId              // e.g. outlayer.testnet [VERIFY name]
+outlayer_contract: AccountId              // outlayer.testnet or outlayer.near
 platform_fee_bps: u16                     // default 500 (5%)
 treasury: AccountId
 next_benchmark_id: u64
@@ -312,7 +312,8 @@ Benchmark { id, version, owner: AccountId, title, description, grading_type,
             status: Active | Retired, created_at_ns, created_block }
 Eval { id, benchmark_id, requester, model_id, backend_id, fee: U128, compute_budget: U128, compute_spent: U128,
        status: Dispatching | Grading | Aggregating | Certified | Failed | Refunded,
-       next_shard_to_dispatch: u32, partials: Vec<Option<SealedPartial>>,
+       next_shard_to_dispatch: u32, retries_left: u32, retry_shards: Vec<u32>,
+       partials: Vec<Option<SealedPartial>>,
        evidence_hashes: Vec<Option<String>>, nonce: String,
        created_at_ns, created_block, deadline_ns }
 Certificate { eval_id, benchmark_id, benchmark_version, dataset_root, protocol_hash,
@@ -330,49 +331,64 @@ Admin:
 - `add_model(model)`, `set_model_active(id, active)`
 
 Owner:
-- `register_benchmark(args) -> u64` (payable, covers storage). Validates: `shard_uris.len() == shard_hashes.len()`, recomputes `dataset_root` from `shard_hashes` and rejects mismatch, price > 0, item_count > 0.
+- `register_benchmark(args) -> u64` (payable, covers storage). Validates: `shard_uris.len() == shard_hashes.len()`, 1 to 64 shards, recomputes `dataset_root` from `shard_hashes` and rejects mismatch, price > 0, item_count > 0.
 - `retire_benchmark(id)` (owner only; existing evals still complete).
 
 Model team:
-- `request_eval(benchmark_id, model_id, backend_id) -> u64` (payable). Requires attached deposit `>= price + compute_budget(shard_count) + EVAL_STORAGE_DEPOSIT`, and refunds any excess at once. `compute_budget(shard_count) = (shard_count + 1) * COMPUTE_PER_RUN`, where the extra run is aggregation and `COMPUTE_PER_RUN` comes from spike S6 [VERIFY]. `EVAL_STORAGE_DEPOSIT` is a flat, non-refundable amount covering the eval and certificate records, sized by a storage test. Checks: benchmark active, model active, backend active, probing limits (count and cooldown). `Usage.count` goes up here and down on `Refunded`, since a refunded eval published no score; the cooldown is not reset. Creates `Eval`, sets `deadline_ns = now + 6h`, dispatches up to `MAX_DISPATCH_PER_TX` shards (default 4) [VERIFY gas].
-- `continue_dispatch(eval_id)` (anyone can call): dispatches the next batch of shards. Requires status `Dispatching` and `now <= deadline_ns`.
+- `request_eval(benchmark_id, model_id, backend_id) -> u64` (payable). Requires attached deposit `>= price + compute_budget(shard_count) + eval_storage_deposit(shard_count)`, and refunds any excess at once. `compute_budget(shard_count) = (shard_count + 1 + MAX_RETRIES) * COMPUTE_PER_RUN`, covering every shard, aggregation and the retries, with `MAX_RETRIES = 3` per eval and `COMPUTE_PER_RUN` a constant 0.02 NEAR (section 7.3). `eval_storage_deposit(shard_count)` is a non-refundable base amount plus a per-shard amount covering the eval and certificate records; a storage test checks it always covers the storage used. Checks: benchmark active, model active, backend active and of kind `OutLayer` (`ShadeDstack` is rejected until Part 2), probing limits (count and cooldown). `Usage.count` goes up here and down on `Refunded`, since a refunded eval published no score; the cooldown is not reset. Creates `Eval`, sets `deadline_ns = now + 6h`, dispatches up to `MAX_DISPATCH_PER_TX = 3` shards (measured in S6, section 7.3; integration tests must confirm it with the real contract's overhead).
+- `continue_dispatch(eval_id)` (anyone can call, requires `now <= deadline_ns`): sends runs up to `MAX_DISPATCH_PER_TX`, queued retries first, then the next unsent shards. Status moves from `Dispatching` to `Grading` once every shard has been sent. With status `Grading`, no queued retries and every partial present, it sets `Aggregating` and dispatches the aggregate run. Otherwise it panics, because there is nothing to send.
 
 Callbacks (`#[private]`). Each is a no-op if the eval is no longer in the status it expects, because a result can arrive after a refund. A rejection sets status `Failed` and returns normally; a panic would discard that state change.
-- `on_shard_graded(eval_id, shard_index)`: expects `Dispatching` or `Grading` and an empty slot for that shard. Parses OutLayer output into `GradeResult`; rejects if `eval_id`, `shard_index` or `shard_hash` mismatch or `ok == false`; stores `sealed_partial` and `evidence_hash`. When all shards are present, sets `Aggregating` and dispatches the aggregate run.
-- `on_aggregated(eval_id)`: expects `Aggregating`. Parses `AggregateResult`; rejects unless `eval_id` matches, `ok == true` and `n_items == benchmark.item_count`; writes `Certificate`; pays treasury `price * platform_fee_bps / 10000` (integer floor) and the owner the remainder; refunds unused compute budget; status `Certified`; emits event.
+- `on_shard_graded(eval_id, shard_index)`: expects `Dispatching` or `Grading` and an empty slot for that shard. Parses OutLayer output into `GradeResult`; rejects if `eval_id`, `shard_index` or `shard_hash` mismatch or `ok == false`; stores `sealed_partial` and `evidence_hash`. A `null` result is a lost or crashed run, not a rejection: if `retries_left > 0`, decrement it and queue the shard in `retry_shards`; otherwise set `Failed`. A failed promise means misconfiguration or too little gas, so it sets `Failed`. Aggregation is started by `continue_dispatch`, not here.
+- `on_aggregated(eval_id)`: expects `Aggregating`. On a `null` result with `retries_left > 0`, decrement it and return to `Grading` so `continue_dispatch` resends aggregation; with none left, set `Failed`. Otherwise parses `AggregateResult`; rejects unless `eval_id` matches, `ok == true` and `n_items == benchmark.item_count`; writes `Certificate`; pays treasury `price * platform_fee_bps / 10000` (integer floor) and the owner the remainder; refunds unused compute budget; status `Certified`; emits event.
 
 Anyone:
 - `refund_expired(eval_id)`: if status is `Failed`, or `now > deadline_ns` and status is neither `Certified` nor `Refunded`, set status `Refunded` first, then refund the requester (`price + compute_budget - compute_spent`).
 
-Views: `get_benchmark`, `list_benchmarks(from, limit)`, `get_eval`, `get_certificate(eval_id)`, `list_certificates(benchmark_id, from, limit)`, `get_backends`, `get_models`, `get_usage(benchmark_id, model_id)`.
+Views: `get_benchmark`, `list_benchmarks(from, limit)`, `get_eval`, `get_certificate(eval_id)`, `list_certificates(benchmark_id, from, limit)`, `get_backends`, `get_models`, `get_usage(benchmark_id, model_id)`, `eval_storage_deposit(shard_count)`. Nanosecond fields (`*_ns`) are `U64` in JSON, a decimal string, because they exceed what a JavaScript number holds exactly.
+
+Storage deposit: 1,500 bytes plus 750 per shard at the storage byte price. Unit tests measured 987 bytes for 1 shard and 43,656 for 64 with the largest allowed results, and fail if the deposit ever falls below the measured use.
 
 Part 2 (after day 8):
 - `register_agent(attestation)`: verifies TDX attestation with the `shade-attestation` crate against the `ShadeDstack` backend measurement; stores agent account and public key.
 - `is_agent_approved(account_id) -> Option<AgentInfo>` (view, read by `outlayer-keyrelease`).
 - `submit_shard_result(eval_id, shard_index, result: GradeResult)`: callable only by a registered agent for evals using a `ShadeDstack` backend.
 
-### 7.3 OutLayer call from the contract [VERIFY]
+### 7.3 OutLayer call from the contract
 
-Cross-contract call to `outlayer_contract.request_execution` with attached deposit from the eval's compute budget, then `.then(on_shard_graded)`. Known shape from docs:
+Cross-contract call to `outlayer_contract.request_execution` with attached deposit from the eval's compute budget, then `.then(on_shard_graded)`. Tested live on testnet in S6 (results in section 15), except `secrets_ref`, which S4 tests:
 
 ```
 request_execution({
-  "source": { "Project": { "project_id": "<owner>/<project>", "version_key": "<pinned to backend.measurement>" } },
+  "source": { "Project": { "project_id": "<owner>/<project>", "version_key": "<backend.measurement>" } },
+  "resource_limits": { "max_instructions": 500000000000, "max_memory_mb": 256, "max_execution_seconds": 180 },
   "input_data": "<GradeRequest JSON string>",
-  "secrets_ref": { "owner": "<benchmark.secret_ref.owner>", "profile": "<benchmark.secret_ref.profile>" }
+  "secrets_ref": { "profile": "<benchmark.secret_ref.profile>", "account_id": "<benchmark.secret_ref.owner>" },
+  "response_format": "Json",
+  "payer_account_id": "<eval.requester>"
 })
 ```
-Confirm in `https://app.outlayer.ai/docs/near-integration`: exact argument names, how the result is returned to the callback, gas and deposit requirements, `version_key` pinning to the approved WASM hash, and how `secrets_ref` is passed.
 
-**Version pinning is a score integrity requirement [FIXED requirement, VERIFY mechanism].** Every dispatch, grade and aggregate, must run the approved WASM. Do not send `version_key: null` unless S6 shows it cannot run anything else. The `WasmHash` condition on K protects only confidentiality: another project version cannot read K, but it could still print a forged `GradeResult` or `AggregateResult`, and the contract would certify it. If OutLayer cannot pin by hash, the callback must check the executed code hash instead. If neither is possible, stop and ask the human, because "scores nobody can fake" would not hold.
+- **`resource_limits` is required.** Without it OutLayer only compiles and never runs the code. S3 may lower these values.
+- **`secrets_ref`** is sent for grade runs only. Aggregate runs do not need K.
+- **Callback result.** With `response_format: "Json"`, the promise succeeds with the grader's stdout as JSON. OutLayer reparses that JSON and may reorder keys, so nothing may depend on its exact bytes. The promise also succeeds, with `null`, when the guest exits non-zero, prints non-JSON or the run is lost. It fails only if `request_execution` itself panics or runs out of gas. Read it with `env::promise_result_checked`, parse it by hand and treat malformed JSON or more than 900 bytes as a rejection. Never use `#[callback_result]`, because a parse failure there panics and loses the `Failed` status.
+- **Lost runs.** 1 of 17 live runs got no result and returned `null` after about 120 s, charged only the base fee. That is one sample, but an 11-run eval would fail about half the time at that rate, so `null` is retried up to `MAX_RETRIES` (section 7.2).
+- **Deposit.** `COMPUTE_PER_RUN` is 0.02 NEAR; `estimate_execution_cost` on testnet returned 0.01905 NEAR for the limits above, and a small live run cost about 0.001 NEAR. A price change means redeploying. Input up to 32 KB holds no extra deposit.
+- **Refunds.** OutLayer sends unused compute straight to `payer_account_id`, so the contract counts all it attaches as `compute_spent`. If `request_execution` itself panics or runs out of gas, that run's deposit returns to the contract and stays there (seen live). This is accepted so the contract can never refund money it does not hold.
+- **Gas.** Attach 60 Tgas to `request_execution` (60 worked with a 20 KB input; 52 ran out) and at least 10 Tgas to each callback. 3 dispatches per transaction used 218 of 300 Tgas, a 27% margin; 4 used 291, a 3% margin. A callback that also starts aggregation uses about 153 Tgas per shard, and 2 of those exceeded the 300 Tgas limit, so aggregation is started by `continue_dispatch`. In the sandbox with the real contract, `request_eval` with 3 dispatches burnt 5.5 Tgas in BlindMark's own receipt, on top of the 210 Tgas it attaches to runs and callbacks.
+- **Callers must not wait for final execution.** A `request_eval` or `continue_dispatch` transaction stays unfinished until OutLayer's worker answers, because OutLayer pauses it with yield/resume. A client waiting for final execution hits its RPC timeout, and some clients, including `near-workspaces`, then re-sign and send the call again, which requests a second eval. Send these calls with `waitUntil: "INCLUDED"` or async, never retry them automatically, and follow progress through `get_eval`.
+
+**Version pinning is a score integrity requirement [FIXED requirement, verified live in S6].** Every dispatch, grade and aggregate, must set `version_key` to the backend's `measurement`. Omitting it runs the project's active version, which the project owner can change: live, a pinned call ran `v1` while an unpinned call ran the newly activated `v2`. The `WasmHash` condition on K protects only confidentiality: another project version cannot read K, but it could still print a forged `GradeResult` or `AggregateResult`, and the contract would certify it.
+
+A version key equals the WASM hash only for a `WasmUrl` version; a GitHub-sourced version's key is `repo@commit`. So the grader must be published as a `WasmUrl` version. `WasmUrl` accepts only `https://` URLs, and OutLayer checks the hash. We host grader builds as GitHub Release assets on this repo.
 
 ### 7.4 Events [FIXED]
 
-NEP-297, `standard: "blindmark"`, `version: "1.0.0"`. Events: `benchmark_registered`, `eval_requested`, `shard_graded`, `eval_certified`, `eval_refunded`, `agent_registered`.
+NEP-297, `standard: "blindmark"`, `version: "1.0.0"`. Events: `benchmark_registered`, `eval_requested`, `shard_graded`, `eval_certified`, `eval_refunded`, `agent_registered`. `data` is a single object, not an array, for example `{"eval_id":0,"amount":"1100000000000000000000000"}`.
 
 ### 7.5 Contract invariants
 
-- The price leaves escrow only on `Certified` (owner + treasury) or `Refunded` (requester), exactly once. The compute budget is spent on OutLayer as runs are dispatched (tracked in `compute_spent`); only the unspent part is returned, and spent compute is not recoverable.
+- The price leaves escrow only on `Certified` (owner + treasury) or `Refunded` (requester), exactly once. The compute budget is spent on OutLayer as runs are dispatched (tracked in `compute_spent`); the contract returns only the part never dispatched, and OutLayer refunds each run's unused compute to the requester directly.
 - `Certified` and `Refunded` are terminal.
 - A certificate is issued only when every shard of the eval has a valid `GradeResult`.
 - Benchmark commitments (`dataset_root`, `protocol_hash`, `shard_hashes`) are immutable; changes require a new version.
@@ -386,11 +402,11 @@ NEP-297, `standard: "blindmark"`, `version: "1.0.0"`. Events: `benchmark_registe
 Single WASM binary, reads JSON from stdin, writes JSON to stdout, flushes. Build: `cargo build --target wasm32-wasip2 --release`. Use `[[bin]]`, not `[lib]` [FIXED per OutLayer docs].
 
 **Secrets and keys.**
-- K arrives as an env var from the OutLayer secret referenced by `secrets_ref`. Env var name: `BLINDMARK_K` (hex) [FIXED name, VERIFY delivery].
+- K arrives as an env var from the OutLayer secret referenced by `secrets_ref`. Env var name: `BLINDMARK_K` (hex) [FIXED name, VERIFY delivery]. **If `BLINDMARK_K` is missing, fail closed.** OutLayer runs the WASM without secrets when the referenced secret does not exist (seen in its worker source), so a missing K must produce `ok: false`, never a graded result.
 - `NEARAI_API_KEY` arrives as an author secret declared in the manifest (`author_secrets`) [VERIFY].
 - Encryption key path `partials` declared in the manifest with `bind: "project"`, `caller: "predecessor"`, and `storage_account: "predecessor"` [VERIFY].
 
-**Secret access condition (owner sets it on the K secret).** `And[ WasmHash(<approved grader sha256>), Predecessor[Whitelist[<blindmark contract>]] ]` so only the approved build, called through our contract, can read K [VERIFY exact condition names in OutLayer Secrets docs].
+**Secret access condition (owner sets it on the K secret).** `{"Logic":{"operator":"And","conditions":[{"WasmHash":{"hash":"<approved grader sha256>"}},{"Predecessor":{"condition":{"Whitelist":{"accounts":["<blindmark contract>"]}}}}]}}` so only the approved build, called through our contract, can read K. Names are from the OutLayer contract source; S4 tests them live [VERIFY]. The `Predecessor` wrapper is essential: every other condition is judged against the transaction signer, not the calling contract.
 
 **Mode `grade` steps.**
 1. Parse and validate `GradeRequest`.
@@ -404,9 +420,11 @@ Single WASM binary, reads JSON from stdin, writes JSON to stdout, flushes. Build
 
 **Mode `aggregate` steps.** Open every sealed partial, check shard indices are `0..expected_shards` exactly once, sum, compute Wilson interval, emit `AggregateResult`.
 
-**Limits [VERIFY].** Execution time 60 s default, 180 s max; output at most 900 bytes; no file system; memory in-process only. Keep shards small enough to finish within the limit (measure in spike S3). The default 50 items will not fit the default limit if run sequentially: at the section 6 example latency that is 92 s before signature fetches. S3 decides the shard size, time limit and any concurrency; record them here.
+**Stdout is public if it is not valid JSON [seen live in S6].** OutLayer writes the failure, including the guest's stdout, to a public on-chain log. So stdout must only ever be the single result JSON, and nothing derived from items, answers, K or model output may reach stdout, including through panic messages or a partly written result. Set a panic handling path that emits a fixed error code. Failure logs also include guest backtraces, so assume stderr and panic text may become public too until S3 shows otherwise.
 
-**Reproducible build [FIXED].** Commit `Cargo.lock`. Use OutLayer's `scripts/build_github_wasm.sh --target wasm32-wasip2` so the sha256 is known before publishing. The sha256 is the backend `measurement` and the secret's `WasmHash` condition.
+**Limits [VERIFY].** Execution time 60 s default, 180 s max; output at most 900 bytes (our own bound, enforced by the contract; OutLayer allows far more); plan for a real limit near 120 s, because a run with no result came back as `null` after about 120 s in S6, and S3 must confirm whether longer runs survive; no file system; memory in-process only. Keep shards small enough to finish within the limit (measure in spike S3). The default 50 items will not fit the default limit if run sequentially: at the section 6 example latency that is 92 s before signature fetches. S3 decides the shard size, time limit and any concurrency; record them here.
+
+**Reproducible build [FIXED].** Commit `Cargo.lock`. Use OutLayer's `scripts/build_github_wasm.sh --target wasm32-wasip2` so the sha256 is known before publishing. The sha256 is the backend `measurement`, the project's `version_key` and the secret's `WasmHash` condition. Publish each build as a `WasmUrl` project version (section 7.3).
 
 **Tamper test (demo).** Change one line (for example, print an item), rebuild, deploy as a new version, run: K must not decrypt (different hash). Also show that the tampered version cannot produce a certificate through the contract (section 7.3). Record both.
 
@@ -450,7 +468,7 @@ Output must be readable by an AI judge from a terminal in under a minute.
 | `/evals/[id]` | Live status: shards graded, aggregation, certificate link |
 | `/certificates/[id]` | Certificate details, trust tier, verify command to copy, data path trace with a proof badge per hop |
 
-Rules: K and plaintext never leave the browser except encrypted to the OutLayer keystore key. Never put K in URLs, logs, analytics or local storage.
+Rules: K and plaintext never leave the browser except encrypted to the OutLayer keystore key. Never put K in URLs, logs, analytics or local storage. Send `request_eval` and `continue_dispatch` without waiting for final execution and never retry them automatically (section 7.3); poll `get_eval` for progress.
 
 Leaderboard: show each model's latest certificate per benchmark and its number of attempts, never its best, because best-of-N inflates scores.
 
@@ -483,7 +501,7 @@ Every certificate shows its tier.
 ## 14. Scope and milestones
 
 **Must-have**
-1. Contract: benchmarks, evals with escrow, backends, models allowlist, certificates, payout, refund, probing limits. **Done when** `near-workspaces` tests pass for payout, refund, second refund rejected, late callback after refund ignored, and probing limits.
+1. Contract: benchmarks, evals with escrow, backends, models allowlist, certificates, payout, refund, probing limits. **Done when** `near-workspaces` tests pass for payout, refund, second refund rejected, late callback after refund ignored, lost-run retries, and probing limits.
 2. Part 1 grader: grade and aggregate modes, E2EE model calls, MCQ/exact/numeric grading, sealed partials. **Done when** a testnet eval through the contract against real NEAR AI produces a certificate, built without the `mock` feature.
 3. Owner upload flow with browser encryption and Merkle root. **Done when** `register_benchmark` accepts the browser-computed root and the grader decrypts the browser-encrypted shards.
 4. Verifier CLI. **Done when** it passes on a real certificate and exits non-zero on a fixture with an altered score.
@@ -528,6 +546,28 @@ Every certificate shows its tier.
 
 Record results in this section as they land.
 
+**S6 result (2026-11-03): passed live on testnet, using a throwaway contract and guest.** The remaining S6 condition, the integration test with the real BlindMark contract, belongs to the contract work. Findings are in sections 7.2, 7.3 and 8. Spike contract: `spike.blindmark-jh-fe87ee.testnet`, project `blindmark-jh-fe87ee.testnet/s6`, builds on the `spike-s6` pre-release (delete after S4 and S7). The Rust 1.99 contract built with `cargo near` deployed and ran on testnet.
+
+| Test | Result | Transaction |
+|---|---|---|
+| Pinned to `v1`, `v2` active | Ran `v1` | `C8DJMvFKYEB9qjxP13LnW3tyiTNFGMBrPw1AuwQQTvV4` |
+| Unpinned | Ran `v2` | `9nhshPUMyTsofUrzXjSHivKiUqfhRJP4HPiD9tpSDh7S` |
+| Guest exits non-zero | Success with `null` | `J1yxrVvNg2mDjjECn4UzXmUvqEyYqama2TrRRAf84zuE` |
+| Guest prints non-JSON | Success with `null`; stdout in public log | `5UYMLYVCXmFZcMLpRF7fhaVdaAf2tSDZYb8KNbEvwpyp` |
+| Unknown version key | Promise failed; deposit back to contract | `3FNxJz2NBPSmvTe8CL8KobFUX46D1GYb4stTFGh4PpYK` |
+| Request gas 52 Tgas | Out of gas; promise failed | `DxAjqfKkfcHWGd32k64VjaabEgqCVhm2QEv4SKLb9Xsq` |
+| 3 dispatches at 60 + 10 Tgas | 218 Tgas; 1 run lost after about 120 s | `HbkfRumdH79nqykyFxGpnZYH1Kqu74qqcGbjgaJ84zn5` |
+| 4 dispatches at 60 + 10 Tgas | 291 Tgas; all ran | `9kSKXYkudz5RqyAJx5TerhUMWBfUF5nh2rkTpCy3abLx` |
+| 20 KB input at 60 Tgas | Ran | `Bcn8UKvuTWBWPuLaj5VdkpGH9424tbHYMhfv6PnS6q6R` |
+| Callback dispatches a follow-up | Ran; 153 Tgas per shard | `ySoEX7TdcDt6LxWMGRE38ABbr4L5y6nWrvUDwAfpCHB` |
+| 2 dispatches with follow-ups | Out of gas; transaction failed | `8BJGpFbX7m5XxApBPNXqPh6MtYVbU8fCKPw6frQrWMqG` |
+
+Role 2 runs S4 and S7 on the spike contract, which accepts any project and can pass `secrets_ref`.
+
+**S6 integration (2026-11-03): passed in a local sandbox** running the real BlindMark contract against OutLayer's deployed contract code, with the test as the worker (`contracts/blindmark/tests/sandbox.rs`). A full eval certified and paid out, a lost run was retried, and an unknown pinned version failed and refunded.
+
+**Testnet end to end (2026-11-03): passed.** `scripts/e2e-testnet-stub.mjs` certified eval 0 on `blindmark.blindmark-jh-fe87ee.testnet` through OutLayer's real worker in about 2.5 minutes, using the test-only stub grader (`scripts/stub-grader`, backend `test-stub-94149ba5`, score 0 by design). One grade run was lost and returned `null` after about 120 s; the contract queued it and resent it, and it then succeeded. That is 2 lost runs out of about 20 on testnet so far, so `MAX_RETRIES` matters. Final `continue_dispatch` transactions: `3tKLYJmAUmExsFEJGqGL3PUYirxVXKQ7RXbDPk1XsGa1`, `3LCig4kwGkWwqEnbNW9FN8RwLFSRA9VGwRA5cCVBkdHP`.
+
 ---
 
 ## 16. Commands
@@ -538,7 +578,7 @@ cargo test -p blindmark-types
 cargo check -p blindmark-contract --target wasm32-unknown-unknown      # near-sdk 5.30 refuses plain host `cargo check`
 cargo install cargo-near --locked                                      # once per machine
 cargo near build non-reproducible-wasm --manifest-path contracts/blindmark/Cargo.toml   # output in target/near/; `reproducible-wasm` untested [VERIFY]
-cargo test -p blindmark-contract
+cargo test -p blindmark-contract                                       # includes sandbox tests: needs network on first run, about 1 minute
 cargo build -p outlayer-grader --target wasm32-wasip2 --release
 
 # JS
@@ -546,8 +586,9 @@ pnpm install
 pnpm --filter @blindmark/web dev
 pnpm --filter @blindmark/verifier build && pnpm blindmark verify <eval_id>
 
-# Deploy (testnet only without asking)
-./scripts/deploy-testnet.sh
+# Deploy (testnet only without asking). Needs .env and `cargo near`; scripts refuse other networks.
+./scripts/deploy-testnet.sh                                            # creates, deploys only changed code, initializes once
+node scripts/e2e-testnet-stub.mjs <stub wasm> <https URL>              # TEST ONLY: throwaway eval with scripts/stub-grader
 ```
 
 ---
@@ -556,7 +597,7 @@ pnpm --filter @blindmark/verifier build && pnpm blindmark verify <eval_id>
 
 - Rust: `cargo fmt`, `cargo clippy -- -D warnings`. No `unwrap()` in contract or grader paths; return typed errors. Keep `blindmark-types` free of NEAR and WASI dependencies so both contract and grader use it.
 - TS: strict mode, ESLint, Prettier. Types in `packages/shared` mirror `blindmark-types` exactly; add JSON test vectors shared by both.
-- Tests: unit tests for merkle, envelope crypto, JCS, Wilson interval, grading normalizers; `near-workspaces` integration tests for escrow, callbacks, refunds and probing limits; a mock OutLayer behind the `mock` feature for contract tests only.
+- Tests: unit tests for merkle, envelope crypto, JCS, Wilson interval, grading normalizers; `near-workspaces` integration tests for escrow, callbacks, refunds and probing limits, run against OutLayer's real Apache-2.0 contract in a local sandbox with the test playing the worker. It is fetched at test time and not committed. A mock OutLayer behind the `mock` feature is the fallback only if that setup fails. Before Role 2's grader is ready, testnet evals use a clearly named test-only stub WASM and backend, never in the demo path.
 - Every public function touching secrets gets a comment stating what it must never log or return.
 
 ---
