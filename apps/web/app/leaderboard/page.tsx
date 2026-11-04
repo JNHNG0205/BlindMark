@@ -40,19 +40,8 @@ export default async function LeaderboardPage({
   const sort: SortKey =
     params.sort && params.sort in SORTS ? (params.sort as SortKey) : "issued";
 
-  let data: Awaited<ReturnType<typeof loadExplore>>;
-  try {
-    data = await loadExplore();
-  } catch (error) {
-    return (
-      <main>
-        <h1>Leaderboard</h1>
-        <p className="error">
-          Could not read the contract: {(error as Error).message}
-        </p>
-      </main>
-    );
-  }
+  // A failed read throws to app/error.tsx, which shows a plain message and a retry.
+  const data = await loadExplore();
   const now = data.readAt;
   const query = params.q?.trim().toLowerCase() ?? "";
   const rows = data.rows

@@ -36,19 +36,8 @@ export default async function HomePage({
   searchParams: Promise<Params>;
 }) {
   const params = await searchParams;
-  let data: ExploreData;
-  try {
-    data = await loadExplore();
-  } catch (error) {
-    return (
-      <main>
-        <h1>BlindMark</h1>
-        <p className="error">
-          Could not read the contract: {(error as Error).message}
-        </p>
-      </main>
-    );
-  }
+  // A failed read throws to app/error.tsx, which shows a plain message and a retry.
+  const data: ExploreData = await loadExplore();
   const now = data.readAt;
   const query = params.q?.trim() ?? "";
   const needle = query.toLowerCase();
